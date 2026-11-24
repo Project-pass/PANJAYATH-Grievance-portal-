@@ -1,4 +1,181 @@
-import { Language } from '../types/portal';
+export const IMG_HERO = '/src/assets/images/panchayat_bhavan_hero_1795502748499.jpg';
+export const IMG_ROAD_BEFORE = '/src/assets/images/grievance_road_before_1795502748537.jpg';
+export const IMG_ROAD_AFTER = '/src/assets/images/grievance_road_after_1795502749598.jpg';
+export const IMG_WATER_LEAK = '/src/assets/images/grievance_water_leak_1795502750018.jpg';
+export const IMG_STREETLIGHT_FIXED = '/src/assets/images/grievance_streetlight_fixed_1795502750170.jpg';
+
+export const ALL_WARDS = Array.from({ length: 15 }, (_, i) => i + 1);
+
+export const DEPARTMENTS = [
+  'General Administration',
+  'Roads & Streetlights',
+  'Water & Sanitation',
+  'Public Health',
+  'Revenue & Certificates',
+  'Building & Planning',
+];
+
+export const GRIEVANCE_CATEGORIES = [
+  'Water Supply',
+  'Streetlights',
+  'Waste Management',
+  'Roads & Drainage',
+  'Public Health',
+  'Encroachment',
+];
+
+export const DEFAULT_ROLE_PERMISSIONS = {
+  SUPER_ADMIN: {
+    canApproveCertificates: true,
+    canAssignTickets: true,
+    canManageUsers: true,
+    canDeleteRecords: true,
+    canVerifyDocuments: true,
+  },
+  WARD_OFFICER: {
+    canApproveCertificates: false,
+    canAssignTickets: false,
+    canManageUsers: false,
+    canDeleteRecords: false,
+    canVerifyDocuments: true,
+  },
+  CSC_OPERATOR: {
+    canApproveCertificates: false,
+    canAssignTickets: false,
+    canManageUsers: false,
+    canDeleteRecords: false,
+    canVerifyDocuments: true,
+  },
+};
+
+export const SERVICE_CATALOG = [
+  {
+    id: 'birth_death',
+    titleEn: 'Birth / Death Certificate',
+    titleMl: 'ജനന / മരണ സർട്ടിഫിക്കറ്റ്',
+    department: 'Revenue & Certificates',
+    feeInr: 0,
+    slaDays: 5,
+    descriptionEn:
+      'Digitally signed statutory extract issued under the Registration of Births and Deaths Act.',
+    descriptionMl: 'ജനന-മരണ രജിസ്ട്രേഷൻ നിയമപ്രകാരം ഡിജിറ്റലായി ഒപ്പിട്ട സർട്ടിഫിക്കറ്റ്.',
+    requiredDocsEn: [
+      'Hospital Discharge Summary / Medical Certificate',
+      'Parents Aadhaar / Identity Proof',
+      'Address Proof within ABC Gram Panchayat',
+    ],
+    requiredDocsMl: [
+      'ആശുപത്രി ഡിസ്ചാർജ് സമ്മറി / മെഡിക്കൽ സർട്ടിഫിക്കറ്റ്',
+      'മാതാപിതാക്കളുടെ ആധാർ / തിരിച്ചറിയൽ രേഖ',
+      'പഞ്ചായത്തിലെ വിലാസ തെളിവ്',
+    ],
+  },
+  {
+    id: 'residence',
+    titleEn: 'Residence Certificate',
+    titleMl: 'താമസ സർട്ടിഫിക്കറ്റ്',
+    department: 'Revenue & Certificates',
+    feeInr: 25,
+    slaDays: 4,
+    descriptionEn:
+      'Official proof of continuous residence within ABC Gram Panchayat wards for welfare and school admissions.',
+    descriptionMl: 'പഞ്ചായത്തിലെ സ്ഥിരതാമസം തെളിയിക്കുന്ന ഔദ്യോഗിക സർട്ടിഫിക്കറ്റ്.',
+    requiredDocsEn: [
+      'Ration Card / Elector Photo ID Card',
+      'Latest Property Tax Receipt or Rent Agreement',
+      'Self-Declaration Form',
+    ],
+    requiredDocsMl: [
+      'റേഷൻ കാർഡ് / വോട്ടർ ഐഡി',
+      'ഏറ്റവും പുതിയ വസ്തുനികുതി രസീത് അല്ലെങ്കിൽ വാടക കരാർ',
+      'സ്വയം സാക്ഷ്യപ്പെടുത്തിയ സത്യവാങ്മൂലം',
+    ],
+  },
+  {
+    id: 'property_tax',
+    titleEn: 'Property Tax Assessment',
+    titleMl: 'വസ്തുനികുതി നിർണ്ണയം',
+    department: 'Revenue & Certificates',
+    feeInr: 50,
+    slaDays: 7,
+    descriptionEn:
+      'New building door-number assessment, ownership mutation, or annual property tax revision.',
+    descriptionMl: 'പുതിയ കെട്ടിട നമ്പർ, ഉടമസ്ഥാവകാശ മാറ്റം, അല്ലെങ്കിൽ നികുതി പുനർനിർണ്ണയം.',
+    requiredDocsEn: [
+      'Registered Title Deed / Ownership Copy',
+      'Approved Building Completion Sketch',
+      'Latest Land Tax Receipt',
+    ],
+    requiredDocsMl: [
+      'ആധാരത്തിന്റെ പകർപ്പ്',
+      'അംഗീകൃത കെട്ടിട പ്ലാൻ',
+      'ഭൂനികുതി രസീത്',
+    ],
+  },
+  {
+    id: 'trade_license',
+    titleEn: 'Trade License (D&O)',
+    titleMl: 'വ്യാപാര ലൈസൻസ്',
+    department: 'General Administration',
+    feeInr: 500,
+    slaDays: 7,
+    descriptionEn:
+      'Annual Panchayat trade & commercial establishment license renewal or fresh registration.',
+    descriptionMl: 'കടകൾക്കും വാണിജ്യ സ്ഥാപനങ്ങൾക്കുമുള്ള പഞ്ചായത്ത് വ്യാപാര ലൈസൻസ്.',
+    requiredDocsEn: [
+      'Building Owner Consent / Lease Agreement',
+      'Property Tax Paid Receipt',
+      'Sanitary / Fire NOC (where applicable)',
+    ],
+    requiredDocsMl: [
+      'കെട്ടിട ഉടമയുടെ സമ്മതപത്രം / വാടക കരാർ',
+      'വസ്തുനികുതി അടച്ച രസീത്',
+      'ഹെൽത്ത് / ഫയർ എൻ.ഒ.സി',
+    ],
+  },
+  {
+    id: 'building_permit',
+    titleEn: 'Building Permit',
+    titleMl: 'കെട്ടിട നിർമ്മാണ അനുമതി',
+    department: 'Building & Planning',
+    feeInr: 1200,
+    slaDays: 14,
+    descriptionEn:
+      'KPBR-compliant residential or commercial construction permit verified by the Panchayat Assistant Engineer.',
+    descriptionMl: 'കെട്ടിട നിർമ്മാണ ചട്ടങ്ങൾ പ്രകാരമുള്ള നിർമ്മാണ അനുമതി.',
+    requiredDocsEn: [
+      'Site & Floor Plan signed by Licensed Engineer',
+      'Possession Certificate & Land Tax Receipt',
+      'Aadhaar Copy of Landowner',
+    ],
+    requiredDocsMl: [
+      'അംഗീകൃത എൻജിനീയർ ഒപ്പിട്ട പ്ലാൻ',
+      'കൈവശാവകാശ സർട്ടിഫിക്കറ്റും ഭൂനികുതി രസീതും',
+      'ഭൂവുടമയുടെ ആധാർ പകർപ്പ്',
+    ],
+  },
+  {
+    id: 'water_connection',
+    titleEn: 'New Water Connection',
+    titleMl: 'പുതിയ കുടിവെള്ള കണക്ഷൻ',
+    department: 'Water & Sanitation',
+    feeInr: 750,
+    slaDays: 7,
+    descriptionEn:
+      'Domestic metered drinking water tap connection from ABC Gram Panchayat Jal Jeevan distribution line.',
+    descriptionMl: 'പഞ്ചായത്ത് കുടിവെള്ള വിതരണ ലൈനിൽ നിന്നുള്ള ഗാർഹിക കണക്ഷൻ.',
+    requiredDocsEn: [
+      'Property Tax Receipt with Door Number',
+      'Applicant Identity Proof (Aadhaar)',
+      'Road Cutting Consent (if crossing Panchayat road)',
+    ],
+    requiredDocsMl: [
+      'വീട്ടുനമ്പർ സഹിതമുള്ള നികുതി രസീത്',
+      'അപേക്ഷകന്റെ ആധാർ പകർപ്പ്',
+      'റോഡ് കട്ടിംഗ് അനുമതി (ആവശ്യമെങ്കിൽ)',
+    ],
+  },
+];
 
 export const TRANSLATIONS = {
   en: {
@@ -171,13 +348,9 @@ export const TRANSLATIONS = {
     feedbackSaved: 'നന്ദി! നിങ്ങളുടെ അഭിപ്രായം രേഖപ്പെടുത്തിയിട്ടുണ്ട്.',
     noRecordFound: 'നൽകിയ ട്രാക്കിംഗ് ഐഡിയുമായി പൊരുത്തപ്പെടുന്ന വിവരങ്ങൾ കണ്ടെത്തിയില്ല.',
   },
-} as const;
+};
 
-export function t(lang: Language) {
-  return TRANSLATIONS[lang];
-}
-
-export const CATEGORY_ML: Record<string, string> = {
+export const CATEGORY_ML = {
   'Water Supply': 'കുടിവെള്ള വിതരണം',
   Streetlights: 'തെരുവുവിളക്കുകൾ',
   'Waste Management': 'മാലിന്യ സംസ്കരണം',
@@ -186,7 +359,7 @@ export const CATEGORY_ML: Record<string, string> = {
   Encroachment: 'കൈയേറ്റം',
 };
 
-export const STATUS_ML: Record<string, string> = {
+export const STATUS_ML = {
   Pending: 'തീർപ്പാക്കാനുണ്ട്',
   'In Progress': 'നടപടി പുരോഗമിക്കുന്നു',
   'Field Inspection': 'ഫീൽഡ് പരിശോധന',
