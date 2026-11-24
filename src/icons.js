@@ -20,19 +20,25 @@ export function getSlaInfo(record, slaLimitDays) {
     return record.sla;
   }
   const ageDays = getTicketAgeDays(record.createdAt);
+  const st = String(record.status || '');
   const isClosed =
-    record.status === 'Resolved' ||
-    record.status === 'Rejected' ||
-    record.status === 'Approved';
+    st === 'RESOLVED' ||
+    st === 'CLOSED' ||
+    st === 'REJECTED' ||
+    st === 'Resolved' ||
+    st === 'Rejected' ||
+    st === 'Approved';
+  const isOnHold = st === 'ON_HOLD';
   const remainingDays = slaLimitDays - ageDays;
-  const isBreached = !isClosed && ageDays > slaLimitDays;
+  const isBreached = !isClosed && !isOnHold && ageDays > slaLimitDays;
 
   let label = `${remainingDays}d left`;
   if (isClosed) label = `Closed (${ageDays}d)`;
+  else if (isOnHold) label = `Paused (${ageDays}d)`;
   else if (isBreached) label = `SLA BREACHED (${ageDays}d)`;
   else if (remainingDays === 0) label = 'Due Today';
 
-  return { ageDays, remainingDays, isBreached, isClosed, label };
+  return { ageDays, remainingDays, isBreached, isClosed, isOnHold, label };
 }
 
 export function formatShortDate(iso) {
@@ -66,11 +72,13 @@ export function downloadReceipt(kind, data, trackingToken = '') {
           'ABC GRAM PANCHAYAT — OFFICIAL GRIEVANCE ACKNOWLEDGEMENT',
           '=======================================================',
           `Tracking ID        : ${data.id}`,
+          `UUID Reference     : ${data.externalUuid || 'N/A'}`,
           `Verification Token : ${trackingToken || 'Issued at submission'}`,
           `Citizen Name       : ${data.citizenName || data.citizenDisplay || 'Citizen'}`,
           `Registered Mobile  : ${mobileDisplay}`,
           `Ward               : Ward ${data.ward}`,
           `Category           : ${data.category}`,
+          `Priority           : ${data.priority || 'NORMAL'}`,
           `Department         : ${data.department}`,
           `Landmark           : ${data.landmark}`,
           `Current Status     : ${data.status}`,
@@ -85,6 +93,7 @@ export function downloadReceipt(kind, data, trackingToken = '') {
           'ABC GRAM PANCHAYAT — E-SERVICE APPLICATION ACKNOWLEDGEMENT',
           '===========================================================',
           `Tracking ID        : ${data.id}`,
+          `UUID Reference     : ${data.externalUuid || 'N/A'}`,
           `Verification Token : ${trackingToken || 'Issued at submission'}`,
           `Service Name       : ${data.serviceName}`,
           `Applicant Name     : ${data.applicantName || data.applicantDisplay || 'Applicant'}`,
@@ -168,24 +177,53 @@ export const ICONS = {
     `<svg class="${cls}" viewBox="0 0 24 24" ${SVG_BASE}><path d="M20 6 9 17l-5-5"/></svg>`,
 };
 
+export function renderPriorityBadge(priority = 'NORMAL') {
+  const p = String(priority || 'NORMAL').toUpperCase();
+  const styles = {
+    CRITICAL: 'bg-red-100 text-red-900 border-red-300',
+    HIGH: 'bg-amber-100 text-amber-900 border-amber-300',
+    NORMAL: 'bg-slate-100 text-slate-700 border-slate-200',
+    LOW: 'bg-slate-50 text-slate-600 border-slate-200',
+  };
+  return `<span class="inline-flex items-center px-2 py-0.5 text-[11px] font-mono font-semibold border rounded whitespace-nowrap ${styles[p] || styles.NORMAL}">${esc(p)}</span>`;
+}
+
 export function renderStatusLabel(status, lang = 'en', statusMap = {}) {
-  const display = lang === 'ml' && statusMap[status] ? statusMap[status] : status;
+  const prettyDefault = status && status.includes('_') ? status.replace(/_/g, ' ') : status;
+  const display = lang === 'ml' && statusMap[status] ? statusMap[status] : prettyDefault;
   let tone = 'bg-slate-100 text-slate-700 border-slate-200';
   let iconHtml = ICONS.clock('w-3.5 h-3.5 shrink-0');
 
-  if (status === 'Resolved' || status === 'Approved') {
+  if (status === 'RESOLVED' || status === 'CLOSED' || status === 'Resolved' || status === 'Approved') {
     tone = 'bg-emerald-50 text-emerald-800 border-emerald-200';
     iconHtml = ICONS.checkCircle('w-3.5 h-3.5 shrink-0');
-  } else if (status === 'Documents Verified') {
+  } else if (status === 'Documents Verified' || status === 'ACKNOWLEDGED') {
     tone = 'bg-teal-50 text-teal-800 border-teal-200';
     iconHtml = ICONS.checkCircle('w-3.5 h-3.5 shrink-0');
-  } else if (status === 'In Progress' || status === 'Field Inspection') {
+  } else if (
+    status === 'IN_PROGRESS' ||
+    status === 'ASSIGNED' ||
+    status === 'REOPENED' ||
+    status === 'In Progress' ||
+    status === 'Field Inspection'
+  ) {
     tone = 'bg-indigo-50 text-indigo-800 border-indigo-200';
     iconHtml = ICONS.search('w-3.5 h-3.5 shrink-0');
-  } else if (status === 'Correction Needed' || status === 'Rejected') {
+  } else if (
+    status === 'ESCALATED' ||
+    status === 'Correction Needed' ||
+    status === 'REJECTED' ||
+    status === 'Rejected'
+  ) {
     tone = 'bg-red-50 text-red-800 border-red-200';
     iconHtml = ICONS.alert('w-3.5 h-3.5 shrink-0');
-  } else if (status === 'Pending' || status === 'Pending Verification' || status === 'Submitted') {
+  } else if (
+    status === 'ON_HOLD' ||
+    status === 'SUBMITTED' ||
+    status === 'Pending' ||
+    status === 'Pending Verification' ||
+    status === 'Submitted'
+  ) {
     tone = 'bg-amber-50 text-amber-800 border-amber-200';
   }
 
@@ -196,6 +234,9 @@ export function renderSlaBadge(record, slaLimitDays) {
   const info = getSlaInfo(record, slaLimitDays);
   if (info.isClosed) {
     return `<span class="inline-flex items-center gap-1 text-xs font-mono tabular-nums text-slate-500 whitespace-nowrap">${esc(info.label)}</span>`;
+  }
+  if (info.isOnHold) {
+    return `<span class="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-mono tabular-nums bg-amber-50 text-amber-800 border border-amber-200 rounded whitespace-nowrap shrink-0">${ICONS.clock('w-3 h-3 shrink-0')}<span>${esc(info.label)}</span></span>`;
   }
   if (info.isBreached) {
     return `<span class="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-semibold font-mono tabular-nums bg-red-600 text-white rounded whitespace-nowrap shrink-0">${ICONS.triangleAlert('w-3.5 h-3.5 shrink-0')}<span>${esc(info.label)}</span></span>`;

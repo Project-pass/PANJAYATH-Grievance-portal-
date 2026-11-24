@@ -5,6 +5,7 @@ import {
   IMG_HERO,
   IMG_ROAD_BEFORE,
   IMG_WATER_LEAK,
+  PRIORITIES,
   SERVICE_CATALOG,
   STATUS_ML,
   TRANSLATIONS,
@@ -15,11 +16,13 @@ import {
   esc,
   formatDateTime,
   formatShortDate,
+  renderPriorityBadge,
   renderSlaBadge,
   renderStatusLabel,
 } from './icons.js';
 import {
   notify,
+  reopenGrievance,
   store,
   submitFeedback,
   submitGrievance,
@@ -29,10 +32,12 @@ import {
 
 function renderHomeView(copy) {
   const stats = store.publicOverview.stats || {
-    resolvedCount: 145,
-    avgDays: '3.2',
+    resolvedCount: 0,
+    totalCount: 0,
+    avgDays: '0.0',
     activeServicesCount: 6,
-    avgRating: '4.6',
+    avgRating: '0.0',
+    ratingCount: 0,
   };
   const lang = store.language;
   const recent = (store.publicOverview.recentWorks || []).slice(0, 5);
@@ -111,7 +116,7 @@ function renderHomeView(copy) {
             <div class="bg-[#F8FAFC] border border-slate-200 rounded-xl p-5">
               <p class="text-xs font-medium text-slate-500">${esc(copy.statsSatisfaction)}</p>
               <p class="mt-1.5 text-2xl sm:text-3xl font-bold font-mono tabular-nums text-slate-900">${esc(stats.avgRating)} / 5.0</p>
-              <p class="mt-1 text-xs text-slate-500">Verified citizen feedback</p>
+              <p class="mt-1 text-xs text-slate-500">${Number(stats.ratingCount || 0)} verified citizen review${Number(stats.ratingCount || 0) === 1 ? '' : 's'}</p>
             </div>
           </div>
         </div>
@@ -187,7 +192,8 @@ function renderHomeView(copy) {
                     </div>
                     <p class="mt-1 text-sm font-medium text-slate-700">${esc(item.department)} · Ward ${item.ward} Civic Redressal</p>
                   </div>
-                  <div class="flex items-center gap-3 shrink-0">
+                  <div class="flex items-center gap-2.5 shrink-0">
+                    ${renderPriorityBadge(item.priority)}
                     ${renderSlaBadge(item, slaLimit)}
                     ${renderStatusLabel(item.status, lang, STATUS_ML)}
                   </div>
@@ -205,6 +211,8 @@ function renderGrievanceView(copy) {
   const lang = store.language;
   const sub = store.submittedGrievance;
   const token = store.submittedGrievanceToken;
+
+  const dups = store.submittedDuplicates || [];
 
   if (sub) {
     return `
@@ -232,14 +240,26 @@ function renderGrievanceView(copy) {
             <p class="font-mono text-sm font-bold text-slate-900 bg-white px-3 py-1.5 rounded border border-indigo-200 select-all">${esc(token)}</p>
           </div>
 
+          ${
+            dups.length > 0
+              ? `<div class="mt-4 p-4 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900">
+                  <p class="font-semibold">Potential Similar Open Grievances Detected in Ward ${sub.ward}</p>
+                  <p class="mt-0.5 text-amber-800">Your ticket was registered, and our desk noted existing open reports in the same category:</p>
+                  <ul class="mt-2 space-y-1 font-mono">
+                    ${dups.map((d) => `<li>${esc(d.id)} · ${esc(d.landmark)} (${esc(d.status)})</li>`).join('')}
+                  </ul>
+                </div>`
+              : ''
+          }
+
           <dl class="mt-6 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-4 text-sm">
             <div><dt class="text-xs text-slate-500">Citizen Name</dt><dd class="font-medium text-slate-900 mt-0.5">${esc(sub.citizenName || sub.citizenDisplay)}</dd></div>
             <div><dt class="text-xs text-slate-500">Registered Mobile</dt><dd class="font-mono tabular-nums text-slate-900 mt-0.5">******${esc(sub.mobileLast4)}</dd></div>
-            <div><dt class="text-xs text-slate-500">Ward & Category</dt><dd class="font-medium text-slate-900 mt-0.5">Ward ${sub.ward} · ${esc(sub.category)}</dd></div>
+            <div><dt class="text-xs text-slate-500">Ward, Category & Priority</dt><dd class="font-medium text-slate-900 mt-0.5 flex flex-wrap items-center gap-2"><span>Ward ${sub.ward} · ${esc(sub.category)}</span>${renderPriorityBadge(sub.priority)}</dd></div>
             <div><dt class="text-xs text-slate-500">Routed Department</dt><dd class="font-medium text-slate-900 mt-0.5">${esc(sub.department)}${sub.assignedOfficerName ? ` (${esc(sub.assignedOfficerName)})` : ''}</dd></div>
             <div class="sm:col-span-2"><dt class="text-xs text-slate-500">Landmark & Description</dt><dd class="text-slate-800 mt-0.5"><strong>${esc(sub.landmark)}:</strong> ${esc(sub.description)}</dd></div>
             <div><dt class="text-xs text-slate-500">Registered At</dt><dd class="font-mono tabular-nums text-slate-700 mt-0.5">${esc(formatDateTime(sub.createdAt))}</dd></div>
-            <div><dt class="text-xs text-slate-500">SLA Deadline</dt><dd class="font-mono tabular-nums text-slate-700 mt-0.5">Within ${store.publicOverview.slaLimitDays} Days</dd></div>
+            <div><dt class="text-xs text-slate-500">SLA Deadline</dt><dd class="font-mono tabular-nums text-slate-700 mt-0.5">Within ${sub.slaLimitDays || store.publicOverview.slaLimitDays} Working Days</dd></div>
           </dl>
 
           <div class="no-print mt-8 pt-6 border-t border-slate-200 flex flex-wrap items-center gap-3">
@@ -258,7 +278,7 @@ function renderGrievanceView(copy) {
       <div class="bg-white border border-slate-200 rounded-xl p-6 sm:p-8">
         <h1 class="font-display text-2xl font-bold text-slate-900">${esc(copy.formGrievanceTitle)}</h1>
         <p class="mt-1.5 text-sm text-slate-600">${esc(copy.formGrievanceSub)}</p>
-        <div id="grv-form-error" class="hidden mt-4 p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800"></div>
+        <div id="grv-form-error" role="alert" aria-live="polite" class="hidden mt-4 p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800"></div>
 
         <form id="citizen-grievance-form" class="mt-6 space-y-5">
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-5">
@@ -272,7 +292,7 @@ function renderGrievanceView(copy) {
             </div>
           </div>
 
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-5">
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-5">
             <div>
               <label for="grv-ward" class="block text-sm font-medium text-slate-700 mb-1.5">${esc(copy.wardSelection)} *</label>
               <select id="grv-ward" name="ward" class="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-[#1E3A8A]">
@@ -283,6 +303,12 @@ function renderGrievanceView(copy) {
               <label for="grv-category" class="block text-sm font-medium text-slate-700 mb-1.5">${esc(copy.categoryLabel)} *</label>
               <select id="grv-category" name="category" class="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-[#1E3A8A]">
                 ${GRIEVANCE_CATEGORIES.map((c) => `<option value="${esc(c)}">${esc(lang === 'ml' ? `${c} (${CATEGORY_ML[c]})` : c)}</option>`).join('')}
+              </select>
+            </div>
+            <div>
+              <label for="grv-priority" class="block text-sm font-medium text-slate-700 mb-1.5">Urgency / Priority *</label>
+              <select id="grv-priority" name="priority" class="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-[#1E3A8A]">
+                ${PRIORITIES.map((p) => `<option value="${p}" ${p === 'NORMAL' ? 'selected' : ''}>${p}</option>`).join('')}
               </select>
             </div>
           </div>
@@ -318,9 +344,16 @@ function renderGrievanceView(copy) {
             }
           </div>
 
+          <div class="bg-[#F8FAFC] border border-slate-200 rounded-lg p-3.5">
+            <label class="flex items-start gap-2.5 text-xs text-slate-700 cursor-pointer">
+              <input id="grv-consent" name="consentAccepted" type="checkbox" required class="mt-0.5 w-4 h-4 rounded border-slate-300 text-[#1E3A8A]" />
+              <span>I consent to ABC Gram Panchayat processing my name, contact number, and grievance location for civic redressal and audit logging. *</span>
+            </label>
+          </div>
+
           <div class="pt-4 border-t border-slate-200 flex items-center justify-end gap-3">
             <button type="button" data-cnav="home" class="px-4 py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-100 rounded-lg cursor-pointer">Cancel</button>
-            <button type="submit" class="px-6 py-2.5 text-sm font-semibold text-white bg-[#1E3A8A] hover:bg-[#172E6E] rounded-lg transition-colors cursor-pointer">${esc(copy.submitGrievanceBtn)}</button>
+            <button type="submit" ${store.isSubmitting ? 'disabled' : ''} class="px-6 py-2.5 text-sm font-semibold text-white bg-[#1E3A8A] hover:bg-[#172E6E] disabled:opacity-60 rounded-lg transition-colors cursor-pointer">${store.isSubmitting ? 'Submitting...' : esc(copy.submitGrievanceBtn)}</button>
           </div>
         </form>
       </div>
@@ -395,7 +428,7 @@ function renderServicesView(copy) {
             </div>
           </div>
 
-          <div id="srv-form-error" class="hidden mt-4 p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800"></div>
+          <div id="srv-form-error" role="alert" aria-live="polite" class="hidden mt-4 p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800"></div>
 
           <form id="citizen-service-form" class="mt-6 space-y-5">
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-5">
@@ -454,7 +487,7 @@ function renderServicesView(copy) {
 
             <div class="pt-4 border-t border-slate-200 flex items-center justify-between gap-3">
               <button type="button" id="btn-back-catalog" class="px-4 py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-100 rounded-lg cursor-pointer">Back to Catalog</button>
-              <button type="submit" class="px-6 py-2.5 text-sm font-semibold text-white bg-[#059669] hover:bg-[#047857] rounded-lg transition-colors cursor-pointer">${esc(copy.submitServiceBtn)}</button>
+              <button type="submit" ${store.isSubmitting ? 'disabled' : ''} class="px-6 py-2.5 text-sm font-semibold text-white bg-[#059669] hover:bg-[#047857] disabled:opacity-60 rounded-lg transition-colors cursor-pointer">${store.isSubmitting ? 'Submitting...' : esc(copy.submitServiceBtn)}</button>
             </div>
           </form>
         </div>
@@ -526,7 +559,7 @@ function renderTrackView(copy) {
 
         ${
           store.trackError
-            ? `<div class="mt-4 p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800">${esc(store.trackError)}</div>`
+            ? `<div role="alert" aria-live="polite" class="mt-4 p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800">${esc(store.trackError)}</div>`
             : ''
         }
       </div>
@@ -562,8 +595,12 @@ function renderTrackView(copy) {
               </p>
             </div>
             <div class="flex flex-col items-start sm:items-end gap-2">
-              ${renderStatusLabel(record.status, lang, STATUS_ML)}
-              ${renderSlaBadge(record, slaLimit)}
+              <div class="flex items-center gap-2">
+                ${record.kind === 'grievance' ? renderPriorityBadge(record.priority) : ''}
+                ${record.escalationLevel > 0 ? `<span class="px-2 py-0.5 text-[11px] font-mono font-semibold bg-red-50 text-red-800 border border-red-200 rounded">L${record.escalationLevel} Escalated</span>` : ''}
+                ${renderStatusLabel(record.status, lang, STATUS_ML)}
+              </div>
+              ${renderSlaBadge(record, record.slaLimitDays || slaLimit)}
             </div>
           </div>
 
@@ -623,7 +660,7 @@ function renderTrackView(copy) {
           }
 
           ${
-            record.kind === 'grievance' && record.status === 'Resolved'
+            record.kind === 'grievance' && (record.status === 'RESOLVED' || record.status === 'CLOSED')
               ? `
             <div class="pt-6 border-t border-slate-200">
               <h3 class="font-display text-base font-bold text-slate-900">${esc(copy.feedbackHeading)}</h3>
@@ -641,6 +678,7 @@ function renderTrackView(copy) {
                     </div>`
                   : `<form id="citizen-feedback-form" data-ticket-id="${esc(record.id)}" class="mt-2 bg-[#F8FAFC] border border-slate-200 rounded-lg p-4 space-y-3">
                       <p class="text-sm text-slate-600">${esc(copy.feedbackDesc)}</p>
+                      <div id="feedback-msg-box" aria-live="polite" class="hidden p-2.5 rounded-lg text-xs"></div>
                       <div class="flex items-center gap-1.5">
                         ${[1, 2, 3, 4, 5]
                           .map(
@@ -655,6 +693,21 @@ function renderTrackView(copy) {
                       <button type="submit" class="px-4 py-2 text-sm font-semibold text-white bg-[#059669] hover:bg-[#047857] rounded-lg cursor-pointer">${esc(copy.submitFeedbackBtn)}</button>
                     </form>`
               }
+            </div>`
+              : ''
+          }
+
+          ${
+            record.kind === 'grievance' && ['RESOLVED', 'CLOSED', 'REJECTED'].includes(record.status)
+              ? `
+            <div class="pt-6 border-t border-slate-200">
+              <h3 class="font-display text-base font-bold text-slate-900">Issue Not Resolved? Request Grievance Reopen</h3>
+              <p class="text-xs text-slate-600 mt-1">If the work is incomplete or recurred, provide a reason (at least 5 characters) to reopen this ticket.</p>
+              <div id="reopen-msg-box" role="alert" aria-live="polite" class="hidden mt-3 p-3 rounded-lg text-xs"></div>
+              <form id="citizen-reopen-form" data-ticket-id="${esc(record.id)}" class="mt-3 space-y-3">
+                <textarea id="reopen-reason-input" name="reason" rows="2" minlength="5" maxlength="500" required placeholder="Explain why this grievance needs further inspection..." class="w-full px-3 py-2 text-sm bg-white border border-slate-300 rounded-lg"></textarea>
+                <button type="submit" class="px-4 py-2 text-xs font-semibold text-[#1E3A8A] bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg cursor-pointer">Reopen Grievance</button>
+              </form>
             </div>`
               : ''
           }
@@ -839,14 +892,16 @@ export function bindCitizenEvents(root) {
     const mobile = String(fd.get('mobile') || '').replace(/\D/g, '');
     const ward = Number(fd.get('ward') || 1);
     const category = String(fd.get('category') || 'Water Supply');
+    const priority = String(fd.get('priority') || 'NORMAL').toUpperCase();
     const landmark = String(fd.get('landmark') || '').trim();
     const description = String(fd.get('description') || '').trim();
+    const consentAccepted = fd.get('consentAccepted') === 'on';
 
     const errBox = root.querySelector('#grv-form-error');
-    if (!citizenName || !/^\d{10}$/.test(mobile) || !landmark || !description) {
+    if (!citizenName || !/^\d{10}$/.test(mobile) || !landmark || !description || !consentAccepted) {
       if (errBox) {
         errBox.textContent =
-          'Please enter valid full name, 10-digit mobile number, landmark, and description.';
+          'Please enter valid full name, 10-digit mobile number, landmark, description, and accept consent.';
         errBox.classList.remove('hidden');
       }
       return;
@@ -856,14 +911,17 @@ export function bindCitizenEvents(root) {
       mobile,
       ward,
       category,
+      priority,
       landmark,
       description,
+      consentAccepted,
       ...(store.gPhotoPreview ? { beforePhotoUrl: store.gPhotoPreview } : {}),
     });
     if (res.ok && res.ticket) {
       store.gPhotoPreview = '';
       store.submittedGrievance = res.ticket;
       store.submittedGrievanceToken = res.trackingToken;
+      store.submittedDuplicates = res.potentialDuplicates || [];
       notify();
     } else if (errBox) {
       errBox.textContent = res.error || 'Submission failed.';
@@ -904,6 +962,7 @@ export function bindCitizenEvents(root) {
   });
   root.querySelector('#btn-submit-another-grv')?.addEventListener('click', () => {
     store.submittedGrievance = null;
+    store.submittedDuplicates = [];
     notify();
   });
 
@@ -1005,7 +1064,36 @@ export function bindCitizenEvents(root) {
     const ticketId = e.target.getAttribute('data-ticket-id');
     const comment = root.querySelector('#feedback-comment')?.value || '';
     if (ticketId) {
-      await submitFeedback(ticketId, store.ratingDraft, comment);
+      const res = await submitFeedback(ticketId, store.ratingDraft, comment);
+      const box = root.querySelector('#feedback-msg-box');
+      if (res && !res.ok && box) {
+        box.className = 'p-2.5 rounded-lg text-xs bg-red-50 border border-red-200 text-red-800';
+        box.textContent = res.error || 'Could not submit rating.';
+        box.classList.remove('hidden');
+      }
+    }
+  });
+
+  root.querySelector('#citizen-reopen-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const ticketId = e.target.getAttribute('data-ticket-id');
+    const reason = String(root.querySelector('#reopen-reason-input')?.value || '').trim();
+    const box = root.querySelector('#reopen-msg-box');
+    if (reason.length < 5) {
+      if (box) {
+        box.className = 'mt-3 p-3 rounded-lg text-xs bg-red-50 border border-red-200 text-red-800';
+        box.textContent = 'Please provide at least 5 characters explaining why the grievance should be reopened.';
+        box.classList.remove('hidden');
+      }
+      return;
+    }
+    if (ticketId) {
+      const res = await reopenGrievance(ticketId, reason);
+      if (res && !res.ok && box) {
+        box.className = 'mt-3 p-3 rounded-lg text-xs bg-red-50 border border-red-200 text-red-800';
+        box.textContent = res.error || 'Unable to reopen grievance.';
+        box.classList.remove('hidden');
+      }
     }
   });
 }

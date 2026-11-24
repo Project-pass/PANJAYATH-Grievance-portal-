@@ -3,8 +3,10 @@ import {
   DEFAULT_ROLE_PERMISSIONS,
   DEPARTMENTS,
   GRIEVANCE_CATEGORIES,
+  GRIEVANCE_STATUS_LABELS,
   IMG_ROAD_AFTER,
   IMG_STREETLIGHT_FIXED,
+  PRIORITIES,
   SERVICE_CATALOG,
 } from './i18n.js';
 import {
@@ -13,22 +15,27 @@ import {
   formatDateTime,
   formatShortDate,
   getSlaInfo,
+  renderPriorityBadge,
   renderSlaBadge,
   renderStatusLabel,
 } from './icons.js';
 import {
+  addGrievanceComment,
   bootstrapClaimSecretary,
   canViewGrievance,
   canViewService,
+  changeOwnPassword,
   connectFirebaseGoogle,
   deleteRecord,
   disconnectFirebaseGoogle,
+  escalateOverdueGrievances,
   getActivePermissions,
   getCurrentUser,
   loginWithCredentials,
   logoutStaff,
   maintenanceReset,
   notify,
+  resetStaffPassword,
   saveStaff,
   store,
   submitGrievance,
@@ -38,6 +45,32 @@ import {
   updateServiceApplication,
   updateSlaLimit,
 } from './store.js';
+
+const CANONICAL_GRIEVANCE_STATUSES = Object.keys(GRIEVANCE_STATUS_LABELS);
+
+const GRIEVANCE_TRANSITIONS = {
+  SUBMITTED: ['ACKNOWLEDGED', 'ASSIGNED', 'IN_PROGRESS', 'ESCALATED', 'REJECTED'],
+  ACKNOWLEDGED: ['ASSIGNED', 'IN_PROGRESS', 'ON_HOLD', 'ESCALATED', 'REJECTED'],
+  ASSIGNED: ['IN_PROGRESS', 'ON_HOLD', 'ESCALATED', 'RESOLVED', 'REJECTED'],
+  IN_PROGRESS: ['ON_HOLD', 'ESCALATED', 'RESOLVED', 'REJECTED'],
+  ON_HOLD: ['ASSIGNED', 'IN_PROGRESS', 'ESCALATED', 'RESOLVED', 'REJECTED'],
+  ESCALATED: ['ASSIGNED', 'IN_PROGRESS', 'ON_HOLD', 'RESOLVED', 'REJECTED'],
+  RESOLVED: ['CLOSED', 'REOPENED'],
+  CLOSED: ['REOPENED'],
+  REJECTED: ['REOPENED'],
+  REOPENED: ['ACKNOWLEDGED', 'ASSIGNED', 'IN_PROGRESS', 'ESCALATED', 'REJECTED'],
+};
+
+function getAllowedNextStatuses(currentStatus, role) {
+  const curr = CANONICAL_GRIEVANCE_STATUSES.includes(currentStatus) ? currentStatus : 'SUBMITTED';
+  const nexts = GRIEVANCE_TRANSITIONS[curr] || [];
+  const filtered = nexts.filter((st) => {
+    if (role === 'CSC_OPERATOR' && ['RESOLVED', 'CLOSED', 'REJECTED'].includes(st)) return false;
+    if (role === 'WARD_OFFICER' && ['CLOSED', 'REOPENED'].includes(st)) return false;
+    return true;
+  });
+  return [curr, ...filtered.filter((s) => s !== curr)];
+}
 
 const PERM_LIST = [
   { key: 'canApproveCertificates', label: 'Approve Certificates', desc: 'Final digital sign-off authority for citizen service certificates' },
@@ -60,7 +93,7 @@ function renderLoginScreen() {
           </div>
           <h1 class="mt-6 font-display text-2xl font-bold text-slate-900">Official Staff & Admin Sign In</h1>
           <p class="mt-1.5 text-sm text-slate-600">Authenticated session access for Panchayat Secretary, Ward Officers, and CSC Front-Desk Operators.</p>
-          <div id="admin-login-error" class="hidden mt-4 p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800"></div>
+          <div id="admin-login-error" role="alert" aria-live="polite" class="hidden mt-4 p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800"></div>
 
           <form id="admin-login-form" class="mt-6 space-y-4">
             <div>
@@ -92,7 +125,7 @@ function renderLoginScreen() {
                   <p class="mt-1.5 text-xs text-slate-600 leading-relaxed">
                     No Secretary password is configured yet. Set a strong one-time initial password (8+ characters combining letters, digits, or symbols) for User ID <span class="font-mono font-semibold text-slate-900">admin_test</span> (<span class="font-mono text-slate-800">secretary@abcpanchayat.gov.in</span>). Once claimed, this setup locks permanently.
                   </p>
-                  <div id="bootstrap-claim-error" class="hidden mt-3 p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-800"></div>
+                  <div id="bootstrap-claim-error" role="alert" aria-live="polite" class="hidden mt-3 p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-800"></div>
                   <form id="bootstrap-claim-form" class="mt-4 space-y-3">
                     <div>
                       <label for="claim-passcode" class="block text-xs font-semibold text-slate-700 mb-1">Choose Secretary Password *</label>
@@ -138,11 +171,12 @@ function renderLoginScreen() {
 
 function renderOverview(user, visibleGrievances, visibleServices) {
   const slaLimit = store.staffDashboard.slaLimitDays || 7;
-  const open = visibleGrievances.filter((g) => g.status !== 'Resolved' && g.status !== 'Rejected');
-  const breached = open.filter((g) => getSlaInfo(g, slaLimit).isBreached);
-  const resolved = visibleGrievances.filter((g) => g.status === 'Resolved').length;
+  const open = visibleGrievances.filter((g) => !['RESOLVED', 'CLOSED', 'REJECTED'].includes(g.status));
+  const breached = open.filter((g) => getSlaInfo(g, g.slaLimitDays || slaLimit).isBreached);
+  const resolved = visibleGrievances.filter((g) => ['RESOLVED', 'CLOSED'].includes(g.status)).length;
   const rate = visibleGrievances.length > 0 ? Math.round((resolved / visibleGrievances.length) * 100) : 0;
   const pendingSrv = visibleServices.filter((s) => s.status !== 'Approved' && s.status !== 'Rejected');
+  const notifications = (store.staffDashboard.notifications || []).slice(0, 6);
 
   const wardCounts = ALL_WARDS.map((w) => ({
     ward: w,
@@ -237,7 +271,7 @@ function renderOverview(user, visibleGrievances, visibleServices) {
       <div class="bg-white border border-slate-200 rounded-xl p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h2 class="font-display text-base font-bold text-slate-900">Grievance SLA Policy Threshold (C Engine)</h2>
-          <p class="text-xs text-slate-600 mt-1">Open tickets older than ${slaLimit} days are flagged as <span class="font-semibold text-red-700">SLA BREACHED</span>.</p>
+          <p class="text-xs text-slate-600 mt-1">Default baseline ${slaLimit} working days (adjusted by category &amp; priority; Sundays and holidays excluded; <code class="font-mono">ON_HOLD</code> pauses SLA).</p>
         </div>
         ${
           user.role === 'SUPER_ADMIN'
@@ -248,6 +282,48 @@ function renderOverview(user, visibleGrievances, visibleServices) {
               </form>`
             : `<span class="text-xs text-slate-500 font-mono">Managed by Panchayat Secretary</span>`
         }
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div class="bg-white border border-slate-200 rounded-xl p-6">
+          <h2 class="font-display text-base font-bold text-slate-900">Recent Assignment & Escalation Alerts</h2>
+          <p class="text-xs text-slate-500 mt-0.5 mb-4">In-app notifications routed to your account</p>
+          ${
+            notifications.length === 0
+              ? `<p class="text-xs text-slate-500">No recent notifications.</p>`
+              : `<div class="space-y-2.5">
+                  ${notifications
+                    .map(
+                      (n) => `
+                    <div class="p-3 rounded-lg bg-[#F8FAFC] border border-slate-200 text-xs">
+                      <div class="flex items-center justify-between gap-2">
+                        <span class="font-mono font-semibold text-[#1E3A8A]">${esc(n.targetId)}</span>
+                        <span class="font-mono text-slate-500">${esc(formatDateTime(n.createdAt))}</span>
+                      </div>
+                      <p class="text-slate-700 mt-1">${esc(n.message)}</p>
+                    </div>`
+                    )
+                    .join('')}
+                </div>`
+          }
+        </div>
+
+        <div class="bg-white border border-slate-200 rounded-xl p-6">
+          <h2 class="font-display text-base font-bold text-slate-900">Account Security · Change My Password</h2>
+          <p class="text-xs text-slate-500 mt-0.5 mb-4">Updating your password automatically revokes all other active sessions.</p>
+          <div id="self-pw-msg" role="alert" aria-live="polite" class="hidden mb-3 p-2.5 rounded-lg text-xs"></div>
+          <form id="self-password-form" class="space-y-3">
+            <div>
+              <label for="self-curr-pw" class="block text-xs font-medium text-slate-700 mb-1">Current Password *</label>
+              <input id="self-curr-pw" name="currentPassword" type="password" required autocomplete="current-password" class="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg" />
+            </div>
+            <div>
+              <label for="self-new-pw" class="block text-xs font-medium text-slate-700 mb-1">New Password (8+ chars, 2+ char classes) *</label>
+              <input id="self-new-pw" name="newPassword" type="password" minlength="8" maxlength="128" required autocomplete="new-password" class="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg" />
+            </div>
+            <button type="submit" class="px-4 py-2 text-xs font-semibold text-white bg-[#1E3A8A] hover:bg-[#172E6E] rounded-lg cursor-pointer">Update My Password</button>
+          </form>
+        </div>
       </div>
     </div>
   `;
@@ -260,7 +336,8 @@ function renderGrievancesDesk(user, visibleGrievances) {
     if (f.status !== 'ALL' && g.status !== f.status) return false;
     if (f.ward !== 'ALL' && g.ward !== Number(f.ward)) return false;
     if (f.category !== 'ALL' && g.category !== f.category) return false;
-    if (f.slaOverdueOnly && !getSlaInfo(g, slaLimit).isBreached) return false;
+    if (f.priority !== 'ALL' && (g.priority || 'NORMAL') !== f.priority) return false;
+    if (f.slaOverdueOnly && !getSlaInfo(g, g.slaLimitDays || slaLimit).isBreached) return false;
     if (f.search.trim()) {
       const hay = `${g.id} ${g.citizenName} ${g.landmark} ${g.description}`.toLowerCase();
       if (!hay.includes(f.search.trim().toLowerCase())) return false;
@@ -275,22 +352,31 @@ function renderGrievancesDesk(user, visibleGrievances) {
           <h1 class="font-display text-2xl font-bold text-slate-900">Grievance Redressal Desk</h1>
           <p class="text-sm text-slate-600 mt-0.5">Showing ${filtered.length} of ${visibleGrievances.length} authorized tickets.</p>
         </div>
-        ${
-          user.role === 'CSC_OPERATOR' || user.role === 'SUPER_ADMIN'
-            ? `<button type="button" data-open-walkin="grievance" class="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-[#1E3A8A] hover:bg-[#172E6E] rounded-lg cursor-pointer">${ICONS.plus('w-4 h-4')}<span>Register Walk-in Grievance</span></button>`
-            : ''
-        }
+        <div class="flex flex-wrap items-center gap-2">
+          ${
+            user.role === 'SUPER_ADMIN'
+              ? `<button type="button" id="btn-escalate-overdue" class="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-amber-900 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-lg cursor-pointer">${ICONS.triangleAlert('w-3.5 h-3.5')}<span>Escalate Overdue Tickets</span></button>`
+              : ''
+          }
+          ${
+            user.role === 'CSC_OPERATOR' || user.role === 'SUPER_ADMIN'
+              ? `<button type="button" data-open-walkin="grievance" class="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-[#1E3A8A] hover:bg-[#172E6E] rounded-lg cursor-pointer">${ICONS.plus('w-4 h-4')}<span>Register Walk-in Grievance</span></button>`
+              : ''
+          }
+        </div>
       </div>
 
-      <div class="bg-white border border-slate-200 rounded-xl p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+      <div id="desk-action-msg" role="status" aria-live="polite" class="hidden p-3 rounded-lg text-xs"></div>
+
+      <div class="bg-white border border-slate-200 rounded-xl p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3">
         <div class="relative lg:col-span-2">
           <span class="text-slate-400 absolute left-3 top-1/2 -translate-y-1/2">${ICONS.search('w-4 h-4')}</span>
           <input id="admin-search-input" type="text" value="${esc(f.search)}" placeholder="Search Tracking ID, citizen, landmark..." class="w-full pl-9 pr-3 py-2 text-sm border border-slate-300 rounded-lg" />
         </div>
         <select id="admin-status-filter" class="px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white">
           <option value="ALL">All Statuses</option>
-          ${['Pending', 'In Progress', 'Field Inspection', 'Resolved', 'Rejected']
-            .map((s) => `<option value="${s}" ${f.status === s ? 'selected' : ''}>${s}</option>`)
+          ${CANONICAL_GRIEVANCE_STATUSES
+            .map((s) => `<option value="${s}" ${f.status === s ? 'selected' : ''}>${esc(GRIEVANCE_STATUS_LABELS[s] || s)}</option>`)
             .join('')}
         </select>
         <select id="admin-ward-filter" class="px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white">
@@ -301,11 +387,15 @@ function renderGrievancesDesk(user, visibleGrievances) {
           <option value="ALL">All Categories</option>
           ${GRIEVANCE_CATEGORIES.map((c) => `<option value="${esc(c)}" ${f.category === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}
         </select>
+        <select id="admin-priority-filter" class="px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white">
+          <option value="ALL">All Priorities</option>
+          ${PRIORITIES.map((p) => `<option value="${p}" ${f.priority === p ? 'selected' : ''}>${p}</option>`).join('')}
+        </select>
 
-        <div class="sm:col-span-2 lg:col-span-5 flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100">
+        <div class="sm:col-span-2 lg:col-span-6 flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100">
           <label class="inline-flex items-center gap-2 text-xs font-semibold text-red-700 cursor-pointer">
             <input id="admin-sla-overdue" type="checkbox" ${f.slaOverdueOnly ? 'checked' : ''} class="w-4 h-4 rounded border-red-300 text-red-600" />
-            <span>Show SLA Overdue Tickets Only (&gt;${slaLimit} days)</span>
+            <span>Show SLA Overdue Tickets Only</span>
           </label>
           <button type="button" id="btn-clear-admin-filters" class="text-xs font-medium text-[#1E3A8A] hover:underline cursor-pointer">Clear filters</button>
         </div>
@@ -321,7 +411,7 @@ function renderGrievancesDesk(user, visibleGrievances) {
                     <tr class="bg-[#F8FAFC] border-b border-slate-200 text-xs font-semibold text-slate-600">
                       <th class="py-3 px-4">Tracking ID</th>
                       <th class="py-3 px-4">Citizen & Location</th>
-                      <th class="py-3 px-4">Category</th>
+                      <th class="py-3 px-4">Category & Priority</th>
                       <th class="py-3 px-4">Assigned Officer</th>
                       <th class="py-3 px-4">SLA</th>
                       <th class="py-3 px-4">Status</th>
@@ -341,9 +431,12 @@ function renderGrievancesDesk(user, visibleGrievances) {
                           <p class="font-medium text-slate-900 truncate">${esc(t.citizenName)} · Ward ${t.ward}</p>
                           <p class="text-xs text-slate-500 truncate">${esc(t.landmark)}</p>
                         </td>
-                        <td class="py-3 px-4 text-xs text-slate-700 whitespace-nowrap">${esc(t.category)}</td>
+                        <td class="py-3 px-4 text-xs text-slate-700 whitespace-nowrap">
+                          <p>${esc(t.category)}</p>
+                          <div class="mt-1">${renderPriorityBadge(t.priority)}</div>
+                        </td>
                         <td class="py-3 px-4 text-xs text-slate-700 whitespace-nowrap">${esc(t.assignedOfficerName || 'Unassigned')}</td>
-                        <td class="py-3 px-4">${renderSlaBadge(t, slaLimit)}</td>
+                        <td class="py-3 px-4">${renderSlaBadge(t, t.slaLimitDays || slaLimit)}</td>
                         <td class="py-3 px-4">${renderStatusLabel(t.status)}</td>
                         <td class="py-3 px-4 text-right">
                           <button type="button" data-open-grv="${esc(t.id)}" class="px-3 py-1.5 text-xs font-semibold text-[#1E3A8A] bg-indigo-50 hover:bg-indigo-100 rounded-md cursor-pointer">Manage</button>
@@ -474,7 +567,7 @@ function renderAccessControl(user, perms) {
         <button type="button" id="btn-create-staff" class="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-white bg-[#1E3A8A] hover:bg-[#172E6E] rounded-lg whitespace-nowrap shrink-0 cursor-pointer">${ICONS.plus('w-4 h-4')}<span>Create Staff Role</span></button>
       </div>
 
-      <div id="access-banner-error" class="hidden p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800"></div>
+      <div id="access-banner-error" role="alert" aria-live="polite" class="hidden p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800"></div>
 
       <div class="bg-white border border-slate-200 rounded-xl overflow-hidden">
         <div class="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
@@ -562,7 +655,7 @@ function renderAccessControl(user, perms) {
       <div class="bg-white border border-red-200 rounded-xl p-6">
         <h2 class="font-display text-base font-bold text-red-900">Authorized Non-Production Maintenance Reset</h2>
         <p class="text-xs text-slate-600 mt-1">Re-initializes non-production seed records under Panchayat Secretary authorization and records an immutable audit event.</p>
-        <div id="maint-reset-msg" class="hidden mt-3 p-2.5 rounded-lg text-xs"></div>
+        <div id="maint-reset-msg" role="alert" aria-live="polite" class="hidden mt-3 p-2.5 rounded-lg text-xs"></div>
         <form id="maintenance-reset-form" class="mt-4 flex flex-wrap items-end gap-3">
           <div>
             <label class="block text-xs font-medium text-slate-700 mb-1">Confirmation Phrase (<code class="font-mono">CONFIRM_PORTAL_RESET</code>)</label>
@@ -637,11 +730,22 @@ function renderAuditLog(user) {
         <div class="flex flex-wrap items-center justify-between gap-4">
           <div>
             <h1 class="font-display text-2xl font-bold text-slate-900">Immutable System Audit Log</h1>
-            <p class="text-sm text-slate-600 mt-0.5">Append-only database triggers prevent modification or deletion of audit history.</p>
+            <p class="text-sm text-slate-600 mt-0.5">
+              Append-only database triggers prevent modification or deletion of audit history.
+              ${store.staffDashboard.auditRetention ? `<span class="font-mono text-xs text-[#059669]">(${store.staffDashboard.auditRetention.totalRecords} records · ${store.staffDashboard.auditRetention.retentionDays}d retention)</span>` : ''}
+            </p>
           </div>
-          <div class="relative w-full sm:w-72">
-            <span class="text-slate-400 absolute left-3 top-1/2 -translate-y-1/2">${ICONS.search('w-4 h-4')}</span>
-            <input id="audit-search-input" type="text" value="${esc(store.adminFilters.auditSearch)}" placeholder="Filter audit log..." class="w-full pl-9 pr-3 py-2 text-sm bg-white border border-slate-300 rounded-lg" />
+          <div class="flex flex-wrap items-center gap-2.5">
+            ${
+              user.role === 'SUPER_ADMIN'
+                ? `<a href="/api/staff/audit/export?format=csv" download="panchayat_audit_logs.csv" class="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-300 rounded-lg">${ICONS.download('w-3.5 h-3.5')}<span>Export CSV</span></a>
+                   <a href="/api/staff/audit/export?format=json" download="panchayat_audit_logs.json" class="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-300 rounded-lg">${ICONS.download('w-3.5 h-3.5')}<span>Export JSON</span></a>`
+                : ''
+            }
+            <div class="relative w-full sm:w-64">
+              <span class="text-slate-400 absolute left-3 top-1/2 -translate-y-1/2">${ICONS.search('w-4 h-4')}</span>
+              <input id="audit-search-input" type="text" value="${esc(store.adminFilters.auditSearch)}" placeholder="Filter audit log..." class="w-full pl-9 pr-3 py-2 text-sm bg-white border border-slate-300 rounded-lg" />
+            </div>
           </div>
         </div>
         <div class="bg-white border border-slate-200 rounded-xl overflow-hidden">
@@ -711,10 +815,14 @@ function renderDetailDrawer(user, perms) {
 
         <div class="p-6 space-y-6 flex-1">
           <div class="flex flex-wrap items-center justify-between gap-3">
-            ${renderStatusLabel(record.status)}
-            ${renderSlaBadge(record, store.staffDashboard.slaLimitDays)}
+            <div class="flex flex-wrap items-center gap-2">
+              ${renderStatusLabel(record.status)}
+              ${isGrv ? renderPriorityBadge(record.priority) : ''}
+              ${isGrv && record.escalationLevel > 0 ? `<span class="px-2 py-0.5 text-[11px] font-mono font-semibold bg-red-50 text-red-800 border border-red-200 rounded">L${record.escalationLevel} Escalated</span>` : ''}
+            </div>
+            ${renderSlaBadge(record, record.slaLimitDays || store.staffDashboard.slaLimitDays)}
           </div>
-          <div id="drawer-msg-box" class="hidden p-3 rounded-lg text-sm"></div>
+          <div id="drawer-msg-box" role="alert" aria-live="polite" class="hidden p-3 rounded-lg text-sm"></div>
 
           <dl class="grid grid-cols-1 sm:grid-cols-2 gap-4 bg-[#F8FAFC] border border-slate-200 rounded-lg p-4 text-sm">
             <div><dt class="text-xs text-slate-500">${isGrv ? 'Citizen Name' : 'Applicant Name'}</dt><dd class="font-semibold text-slate-900 mt-0.5">${esc(isGrv ? record.citizenName : record.applicantName)}</dd></div>
@@ -732,13 +840,19 @@ function renderDetailDrawer(user, perms) {
                       ? `<div><p class="text-xs font-semibold text-slate-600 mb-1.5">Citizen Evidence Photo</p><img src="${esc(record.beforePhotoUrl)}" alt="Evidence" referrerpolicy="no-referrer" class="w-full max-h-52 object-cover rounded-lg border border-slate-200" /></div>`
                       : ''
                   }
-                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
                     <div>
                       <label class="block text-xs font-semibold text-slate-700 mb-1.5">Workflow Status</label>
                       <select name="status" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white">
-                        ${['Pending', 'In Progress', 'Field Inspection', 'Resolved', 'Rejected']
-                          .map((st) => `<option value="${st}" ${record.status === st ? 'selected' : ''}>${st}</option>`)
+                        ${getAllowedNextStatuses(record.status, user.role)
+                          .map((st) => `<option value="${st}" ${record.status === st ? 'selected' : ''}>${esc(GRIEVANCE_STATUS_LABELS[st] || st)}</option>`)
                           .join('')}
+                      </select>
+                    </div>
+                    <div>
+                      <label class="block text-xs font-semibold text-slate-700 mb-1.5">Priority</label>
+                      <select name="priority" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white">
+                        ${PRIORITIES.map((p) => `<option value="${p}" ${(record.priority || 'NORMAL') === p ? 'selected' : ''}>${p}</option>`).join('')}
                       </select>
                     </div>
                     <div>
@@ -758,7 +872,8 @@ function renderDetailDrawer(user, perms) {
                     </div>
                   </div>
                   <div>
-                    <label class="block text-xs font-semibold text-slate-700 mb-1.5">Official Public Remark</label>
+                    <label class="block text-xs font-semibold text-slate-700 mb-1">Official Public Remark</label>
+                    <p class="text-[11px] text-slate-500 mb-1.5">Minimum 5 characters mandatory when moving to On Hold, Escalated, Resolved, or Rejected.</p>
                     <textarea name="publicRemark" rows="2" maxlength="1000" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg">${esc(record.publicRemark || '')}</textarea>
                   </div>
                   <div>
@@ -784,9 +899,42 @@ function renderDetailDrawer(user, perms) {
                         ? `<button type="button" id="btn-delete-record" data-del-kind="grievance" data-del-id="${esc(record.id)}" class="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg cursor-pointer">${ICONS.trash('w-3.5 h-3.5')}<span>Delete Ticket</span></button>`
                         : `<span class="text-xs text-slate-400">Delete restricted to Super Admin</span>`
                     }
-                    <button type="submit" class="px-5 py-2 text-sm font-semibold text-white bg-[#1E3A8A] hover:bg-[#172E6E] rounded-lg cursor-pointer">Save Ticket Update</button>
+                    <button type="submit" ${store.isSubmitting ? 'disabled' : ''} class="px-5 py-2 text-sm font-semibold text-white bg-[#1E3A8A] hover:bg-[#172E6E] disabled:opacity-60 rounded-lg cursor-pointer">Save Ticket Update</button>
                   </div>
-                </form>`
+                </form>
+
+                <div class="pt-4 border-t border-slate-200 space-y-3">
+                  <h3 class="text-xs font-semibold text-slate-700">Case Notes &amp; Comments (${(record.comments || []).length})</h3>
+                  <div id="comment-msg-box" aria-live="polite" class="hidden p-2.5 rounded-lg text-xs"></div>
+                  ${
+                    (record.comments || []).length > 0
+                      ? `<div class="space-y-2">
+                          ${(record.comments || [])
+                            .map(
+                              (c) => `
+                            <div class="p-2.5 rounded-lg border text-xs ${c.isInternal ? 'bg-amber-50 border-amber-200' : 'bg-[#F8FAFC] border-slate-200'}">
+                              <div class="flex items-center justify-between gap-2">
+                                <span class="font-semibold text-slate-900">${esc(c.authorName)} ${c.isInternal ? '<span class="ml-1 px-1.5 py-0.5 text-[10px] font-mono bg-amber-200 text-amber-900 rounded">Internal</span>' : ''}</span>
+                                <span class="font-mono text-slate-500">${esc(formatDateTime(c.createdAt))}</span>
+                              </div>
+                              <p class="text-slate-800 mt-1">${esc(c.body)}</p>
+                            </div>`
+                            )
+                            .join('')}
+                        </div>`
+                      : `<p class="text-xs text-slate-500">No comments added yet.</p>`
+                  }
+                  <form id="drawer-comment-form" data-id="${esc(record.id)}" class="space-y-2">
+                    <textarea name="body" rows="2" minlength="2" maxlength="1000" required placeholder="Add an official update or internal note..." class="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"></textarea>
+                    <div class="flex items-center justify-between gap-2">
+                      <label class="inline-flex items-center gap-1.5 text-xs text-slate-700 cursor-pointer">
+                        <input type="checkbox" name="isInternal" class="w-3.5 h-3.5 rounded border-slate-300 text-[#1E3A8A]" />
+                        <span>Internal Staff Note Only</span>
+                      </label>
+                      <button type="submit" class="px-3.5 py-1.5 text-xs font-semibold text-[#1E3A8A] bg-indigo-50 hover:bg-indigo-100 rounded-lg cursor-pointer">Add Comment</button>
+                    </div>
+                  </form>
+                </div>`
               : `<form id="drawer-srv-form" data-id="${esc(record.id)}" class="space-y-4">
                   <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
@@ -875,7 +1023,7 @@ function renderStaffModal() {
         </div>
 
         <form id="staff-role-form" class="p-6 space-y-5">
-          <div id="staff-modal-error" class="hidden p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800"></div>
+          <div id="staff-modal-error" role="alert" aria-live="polite" class="hidden p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800"></div>
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div><label class="block text-xs font-semibold text-slate-700 mb-1">Full Name *</label><input name="name" type="text" required value="${esc(editing?.name || '')}" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg" /></div>
             <div><label class="block text-xs font-semibold text-slate-700 mb-1">User ID (Username)</label><input name="username" type="text" minlength="3" maxlength="48" placeholder="e.g. ward_officer_1" value="${esc(editing?.username || '')}" class="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg" /></div>
@@ -939,6 +1087,20 @@ function renderStaffModal() {
             <button type="submit" class="px-5 py-2 text-sm font-semibold text-white bg-[#1E3A8A] hover:bg-[#172E6E] rounded-lg cursor-pointer">${editing ? 'Save Role Changes' : 'Create Staff Account'}</button>
           </div>
         </form>
+        ${
+          editing
+            ? `<div class="px-6 pb-6">
+                <div class="bg-[#F8FAFC] border border-slate-200 rounded-lg p-4 space-y-3">
+                  <p class="text-xs font-semibold text-slate-900">Force Password Reset &amp; Revoke Sessions</p>
+                  <div id="staff-reset-pw-msg" role="alert" aria-live="polite" class="hidden p-2.5 rounded-lg text-xs"></div>
+                  <form id="staff-reset-pw-form" data-staff-id="${esc(editing.id)}" class="flex flex-wrap items-center gap-2.5">
+                    <input name="newPassword" type="password" minlength="8" maxlength="128" required placeholder="New strong password (8+ chars)" class="flex-1 min-w-[200px] px-3 py-2 text-xs font-mono bg-white border border-slate-300 rounded-lg" />
+                    <button type="submit" class="px-3.5 py-2 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg cursor-pointer">Reset Password</button>
+                  </form>
+                </div>
+              </div>`
+            : ''
+        }
       </div>
     </div>
   `;
@@ -955,6 +1117,7 @@ function renderWalkInModal() {
           <button type="button" id="btn-close-walkin" class="p-1.5 text-slate-500 hover:text-slate-900 rounded-lg cursor-pointer">${ICONS.x('w-5 h-5')}</button>
         </div>
         <form id="walkin-form" class="p-6 space-y-4">
+          <div id="walkin-error" role="alert" aria-live="polite" class="hidden p-2.5 rounded-lg bg-red-50 border border-red-200 text-xs text-red-800"></div>
           <div class="flex items-center gap-1 p-1 bg-slate-100 rounded-lg">
             <button type="button" data-open-walkin="grievance" class="flex-1 py-1.5 text-xs font-semibold rounded-md cursor-pointer ${isGrv ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600'}">Walk-in Grievance</button>
             <button type="button" data-open-walkin="service" class="flex-1 py-1.5 text-xs font-semibold rounded-md cursor-pointer ${!isGrv ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600'}">Walk-in E-Service</button>
@@ -973,13 +1136,16 @@ function renderWalkInModal() {
           </div>
           ${
             isGrv
-              ? `<div><label class="block text-xs font-semibold text-slate-700 mb-1">Landmark *</label><input name="landmark" type="text" maxlength="200" required class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg" /></div>
+              ? `<div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                   <div><label class="block text-xs font-semibold text-slate-700 mb-1">Priority *</label><select name="priority" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white">${PRIORITIES.map((p) => `<option value="${p}" ${p === 'NORMAL' ? 'selected' : ''}>${p}</option>`).join('')}</select></div>
+                   <div><label class="block text-xs font-semibold text-slate-700 mb-1">Landmark *</label><input name="landmark" type="text" maxlength="200" required class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg" /></div>
+                 </div>
                  <div><label class="block text-xs font-semibold text-slate-700 mb-1">Description *</label><textarea name="description" rows="3" maxlength="2000" required class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"></textarea></div>`
               : `<div><label class="block text-xs font-semibold text-slate-700 mb-1">Residential Address *</label><input name="address" type="text" maxlength="300" required class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg" /></div>`
           }
           <div class="pt-3 border-t border-slate-200 flex items-center justify-end gap-3">
             <button type="button" id="btn-close-walkin-2" class="px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 rounded-lg cursor-pointer">Cancel</button>
-            <button type="submit" class="px-5 py-2 text-sm font-semibold text-white bg-[#1E3A8A] hover:bg-[#172E6E] rounded-lg cursor-pointer">Create Record</button>
+            <button type="submit" ${store.isSubmitting ? 'disabled' : ''} class="px-5 py-2 text-sm font-semibold text-white bg-[#1E3A8A] hover:bg-[#172E6E] disabled:opacity-60 rounded-lg cursor-pointer">Create Record</button>
           </div>
         </form>
       </div>
@@ -1169,6 +1335,37 @@ export function bindAdminEvents(root) {
     await updateSlaLimit(val);
   });
 
+  root.querySelector('#self-password-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const currPw = String(fd.get('currentPassword') || '');
+    const newPw = String(fd.get('newPassword') || '');
+    const res = await changeOwnPassword(currPw, newPw);
+    const box = root.querySelector('#self-pw-msg');
+    if (box) {
+      box.className = `mb-3 p-2.5 rounded-lg text-xs border ${
+        res.ok ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-red-50 border-red-200 text-red-800'
+      }`;
+      box.textContent = res.ok ? 'Password updated and prior sessions revoked.' : res.error || 'Password update failed.';
+      box.classList.remove('hidden');
+    }
+    if (res.ok) e.target.reset();
+  });
+
+  root.querySelector('#btn-escalate-overdue')?.addEventListener('click', async () => {
+    const res = await escalateOverdueGrievances();
+    const box = root.querySelector('#desk-action-msg');
+    if (box) {
+      box.className = `p-3 rounded-lg text-xs border ${
+        res.ok ? 'bg-amber-50 border-amber-200 text-amber-900' : 'bg-red-50 border-red-200 text-red-800'
+      }`;
+      box.textContent = res.ok
+        ? `Escalation sweep complete: ${res.count || 0} overdue grievance(s) escalated.`
+        : res.error || 'Escalation sweep failed.';
+      box.classList.remove('hidden');
+    }
+  });
+
   root.querySelector('#admin-search-input')?.addEventListener('input', (e) => {
     store.adminFilters.search = e.target.value;
     notify();
@@ -1191,12 +1388,24 @@ export function bindAdminEvents(root) {
     store.adminFilters.category = e.target.value;
     notify();
   });
+  root.querySelector('#admin-priority-filter')?.addEventListener('change', (e) => {
+    store.adminFilters.priority = e.target.value;
+    notify();
+  });
   root.querySelector('#admin-sla-overdue')?.addEventListener('change', (e) => {
     store.adminFilters.slaOverdueOnly = e.target.checked;
     notify();
   });
   root.querySelector('#btn-clear-admin-filters')?.addEventListener('click', () => {
-    store.adminFilters = { ...store.adminFilters, search: '', status: 'ALL', ward: 'ALL', category: 'ALL', slaOverdueOnly: false };
+    store.adminFilters = {
+      ...store.adminFilters,
+      search: '',
+      status: 'ALL',
+      ward: 'ALL',
+      category: 'ALL',
+      priority: 'ALL',
+      slaOverdueOnly: false,
+    };
     notify();
   });
 
@@ -1253,6 +1462,7 @@ export function bindAdminEvents(root) {
     const fd = new FormData(e.target);
     const patch = {
       status: String(fd.get('status') || ''),
+      priority: String(fd.get('priority') || 'NORMAL').toUpperCase(),
       publicRemark: String(fd.get('publicRemark') || ''),
       internalRemark: String(fd.get('internalRemark') || ''),
     };
@@ -1270,6 +1480,21 @@ export function bindAdminEvents(root) {
       }`;
       msg.textContent = res.ok ? 'Ticket updated and logged in immutable Audit Trail.' : res.error || 'Update failed.';
       msg.classList.remove('hidden');
+    }
+  });
+
+  root.querySelector('#drawer-comment-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const id = e.target.getAttribute('data-id');
+    const fd = new FormData(e.target);
+    const body = String(fd.get('body') || '').trim();
+    const isInternal = fd.get('isInternal') === 'on';
+    const res = await addGrievanceComment(id, body, isInternal);
+    const box = root.querySelector('#comment-msg-box');
+    if (box && !res.ok) {
+      box.className = 'p-2.5 rounded-lg text-xs bg-red-50 border border-red-200 text-red-800';
+      box.textContent = res.error || 'Could not add comment.';
+      box.classList.remove('hidden');
     }
   });
 
@@ -1410,6 +1635,23 @@ export function bindAdminEvents(root) {
     notify();
   });
 
+  root.querySelector('#staff-reset-pw-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const staffId = e.target.getAttribute('data-staff-id');
+    const fd = new FormData(e.target);
+    const newPw = String(fd.get('newPassword') || '');
+    const res = await resetStaffPassword(staffId, newPw);
+    const box = root.querySelector('#staff-reset-pw-msg');
+    if (box) {
+      box.className = `p-2.5 rounded-lg text-xs border ${
+        res.ok ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-red-50 border-red-200 text-red-800'
+      }`;
+      box.textContent = res.ok ? 'Staff password reset and active sessions invalidated.' : res.error || 'Reset failed.';
+      box.classList.remove('hidden');
+    }
+    if (res.ok) e.target.reset();
+  });
+
   root.querySelector('#maintenance-reset-form')?.addEventListener('submit', async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
@@ -1444,7 +1686,14 @@ export function bindAdminEvents(root) {
     const name = String(fd.get('name') || '').trim();
     const mobile = String(fd.get('mobile') || '').replace(/\D/g, '');
     const ward = Number(fd.get('ward') || 1);
-    if (!name || !/^\d{10}$/.test(mobile)) return;
+    const errBox = root.querySelector('#walkin-error');
+    if (!name || !/^\d{10}$/.test(mobile)) {
+      if (errBox) {
+        errBox.textContent = 'Enter a valid name and 10-digit mobile number.';
+        errBox.classList.remove('hidden');
+      }
+      return;
+    }
 
     if (store.walkInType === 'grievance') {
       const res = await submitGrievance(
@@ -1453,12 +1702,21 @@ export function bindAdminEvents(root) {
           mobile,
           ward,
           category: String(fd.get('category') || 'Water Supply'),
+          priority: String(fd.get('priority') || 'NORMAL').toUpperCase(),
           landmark: String(fd.get('landmark') || ''),
           description: String(fd.get('description') || ''),
+          consentAccepted: true,
         },
         true
       );
-      if (res.ok && res.ticket) store.selectedGrievanceId = res.ticket.id;
+      if (!res.ok) {
+        if (errBox) {
+          errBox.textContent = res.error || 'Could not register walk-in grievance.';
+          errBox.classList.remove('hidden');
+        }
+        return;
+      }
+      if (res.ticket) store.selectedGrievanceId = res.ticket.id;
     } else {
       const serviceId = String(fd.get('serviceId') || 'residence');
       const cat = SERVICE_CATALOG.find((c) => c.id === serviceId) || SERVICE_CATALOG[0];
@@ -1474,7 +1732,14 @@ export function bindAdminEvents(root) {
         },
         true
       );
-      if (res.ok && res.application) store.selectedServiceId = res.application.id;
+      if (!res.ok) {
+        if (errBox) {
+          errBox.textContent = res.error || 'Could not register walk-in service.';
+          errBox.classList.remove('hidden');
+        }
+        return;
+      }
+      if (res.application) store.selectedServiceId = res.application.id;
     }
     store.walkInType = null;
     notify();

@@ -1,0 +1,41 @@
+name: CI Verification & Security Checks
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  backend-and-c-engine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile and verify C SLA/RBAC engine
+        run: python3 backend/c_engine/build.py --force
+      - name: Run unit, integration, security, E2E, and performance tests
+        run: python3 -m unittest discover -s backend/tests -p "test_*.py" -v
+      - name: Verify backup, restore drill, and audit retention check
+        run: |
+          MANIFEST=$(python3 backend/maintenance.py backup)
+          echo "$MANIFEST"
+          BKP_FILE=$(python3 -c 'import json, sys; print(json.loads(sys.stdin.read())["backupFile"])' <<< "$MANIFEST")
+          python3 backend/maintenance.py restore-drill "$BKP_FILE"
+          python3 backend/maintenance.py retention-check --days 365
+
+  frontend-and-rules:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - name: Lint Firestore security rules
+        run: npx eslint firestore.rules
+      - name: TypeScript / Vite build check
+        run: npm run lint && npm run build

@@ -1,11 +1,19 @@
+from __future__ import annotations
+
 import hashlib
 import hmac
+import ipaddress
 import os
 import re
 import secrets
 import threading
 import time
+import uuid
 from collections import defaultdict
+from urllib.parse import urlparse
+
+from app.core.config import load_or_create_session_secret
+from app.policies.rbac import CANONICAL_GRIEVANCE_STATUSES, LEGACY_STATUS_MAP, normalize_grievance_status
 
 ALL_WARDS = list(range(1, 16))
 
@@ -27,13 +35,9 @@ GRIEVANCE_CATEGORIES = {
     "Encroachment",
 }
 
-GRIEVANCE_STATUSES = {
-    "Pending",
-    "In Progress",
-    "Field Inspection",
-    "Resolved",
-    "Rejected",
-}
+PRIORITIES = {"LOW", "NORMAL", "HIGH", "CRITICAL"}
+
+GRIEVANCE_STATUSES = set(CANONICAL_GRIEVANCE_STATUSES) | set(LEGACY_STATUS_MAP.keys())
 
 SERVICE_STATUSES = {
     "Submitted",
@@ -58,16 +62,23 @@ _DATA_IMAGE_RE = re.compile(r"^data:image/(png|jpeg|jpg|webp);base64,[A-Za-z0-9+
 _EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
 _USERNAME_RE = re.compile(r"^[a-zA-Z0-9_.\-]{3,48}$")
 _TRACKING_ID_RE = re.compile(r"^ABC-(GRV|SRV)-2026-\d{1,6}$")
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.I)
 _ID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,64}$")
 
-_PROCESS_FALLBACK_SECRET = secrets.token_bytes(32)
+_SESSION_SECRET_CACHE: bytes | None = None
+_SECRET_LOCK = threading.Lock()
 
 
-def get_session_secret_bytes():
-    raw = os.environ.get("PANCHAYAT_SESSION_SECRET", "").strip()
-    if raw:
-        return raw.encode("utf-8")
-    return _PROCESS_FALLBACK_SECRET
+def get_session_secret_bytes(reset_cache: bool = False) -> bytes:
+    global _SESSION_SECRET_CACHE
+    with _SECRET_LOCK:
+        if reset_cache or _SESSION_SECRET_CACHE is None:
+            _SESSION_SECRET_CACHE = load_or_create_session_secret()
+        return _SESSION_SECRET_CACHE
+
+
+def generate_uuid_v4() -> str:
+    return str(uuid.uuid4())
 
 
 def hash_passcode(passcode: str) -> str:
@@ -147,6 +158,25 @@ def normalize_text(val, max_len: int, min_len: int = 0, field_name: str = "field
     return cleaned
 
 
+def is_safe_external_https_url(url: str, allowed_hosts: set[str]) -> bool:
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    if parsed.scheme != "https" or not parsed.hostname:
+        return False
+    host = parsed.hostname.lower()
+    if host in ("localhost", "127.0.0.1", "::1") or host not in allowed_hosts:
+        return False
+    try:
+        ip_obj = ipaddress.ip_address(host)
+        if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local or ip_obj.is_reserved:
+            return False
+    except ValueError:
+        pass
+    return True
+
+
 def validate_photo_url(val) -> str | None:
     if val is None or val == "":
         return None
@@ -175,7 +205,7 @@ def ensure_allowed_keys(body: dict, allowed_keys: set[str], required_keys: set[s
 
 
 def validate_grievance_create(body: dict) -> dict:
-    allowed = {"citizenName", "mobile", "ward", "category", "landmark", "description", "beforePhotoUrl"}
+    allowed = {"citizenName", "mobile", "ward", "category", "priority", "landmark", "description", "beforePhotoUrl", "consentAccepted"}
     required = {"citizenName", "mobile", "ward", "category", "landmark", "description"}
     ensure_allowed_keys(body, allowed, required)
 
@@ -195,18 +225,25 @@ def validate_grievance_create(body: dict) -> dict:
     if category not in GRIEVANCE_CATEGORIES:
         raise ValueError("Invalid grievance category.")
 
+    priority = normalize_text(str(body.get("priority") or "NORMAL"), 16, 2, "priority").upper()
+    if priority not in PRIORITIES:
+        raise ValueError("Invalid priority (LOW, NORMAL, HIGH, CRITICAL).")
+
     landmark = normalize_text(body["landmark"], 200, 2, "landmark")
     description = normalize_text(body["description"], 2000, 5, "description")
     before_photo = validate_photo_url(body.get("beforePhotoUrl"))
+    consent = bool(body.get("consentAccepted", True))
 
     return {
         "citizenName": citizen_name,
         "mobile": mobile,
         "ward": ward,
         "category": category,
+        "priority": priority,
         "landmark": landmark,
         "description": description,
         "beforePhotoUrl": before_photo,
+        "consentAccepted": consent,
     }
 
 
@@ -241,7 +278,12 @@ def validate_service_create(body: dict, valid_service_ids: set[str]) -> dict:
     uploaded = body.get("uploadedDocNames") or []
     if not isinstance(uploaded, list) or len(uploaded) > 10:
         raise ValueError("Uploaded document names list exceeds limit (10).")
-    clean_uploaded = [normalize_text(u, 140, 1, "uploadedDocName") for u in uploaded]
+    clean_uploaded = []
+    for u in uploaded:
+        name = normalize_text(u, 140, 1, "uploadedDocName")
+        if "/" in name or "\\" in name or ".." in name:
+            raise ValueError("Invalid uploaded document filename.")
+        clean_uploaded.append(name)
 
     return {
         "serviceId": service_id,
@@ -255,17 +297,22 @@ def validate_service_create(body: dict, valid_service_ids: set[str]) -> dict:
 
 
 def validate_grievance_patch(body: dict) -> dict:
-    allowed = {"status", "assignedOfficerId", "publicRemark", "internalRemark", "afterPhotoUrl"}
+    allowed = {"status", "priority", "assignedOfficerId", "publicRemark", "internalRemark", "afterPhotoUrl"}
     ensure_allowed_keys(body, allowed)
     if not body:
         raise ValueError("Update payload cannot be empty.")
 
     out = {}
     if "status" in body:
-        st = normalize_text(body["status"], 40, 2, "status")
-        if st not in GRIEVANCE_STATUSES:
+        st_raw = normalize_text(body["status"], 40, 2, "status")
+        if st_raw not in GRIEVANCE_STATUSES:
             raise ValueError("Invalid grievance workflow status.")
-        out["status"] = st
+        out["status"] = normalize_grievance_status(st_raw)
+    if "priority" in body:
+        pr = normalize_text(str(body["priority"]), 16, 2, "priority").upper()
+        if pr not in PRIORITIES:
+            raise ValueError("Invalid grievance priority.")
+        out["priority"] = pr
     if "assignedOfficerId" in body:
         oid = body["assignedOfficerId"]
         if oid in (None, ""):
@@ -383,9 +430,13 @@ def validate_tracking_query(body: dict) -> tuple[str, str, str]:
     required = {"trackingId", "trackingToken", "mobileLast4"}
     ensure_allowed_keys(body, allowed, required)
 
-    tid = normalize_text(body["trackingId"], 32, 5, "trackingId").upper()
-    if not _TRACKING_ID_RE.match(tid):
-        raise ValueError("Invalid Tracking ID format.")
+    raw_tid = normalize_text(body["trackingId"], 64, 5, "trackingId")
+    if _UUID_RE.match(raw_tid):
+        tid = raw_tid.lower()
+    else:
+        tid = raw_tid.upper()
+        if not _TRACKING_ID_RE.match(tid):
+            raise ValueError("Invalid Tracking ID format.")
     token = normalize_text(body["trackingToken"], 128, 8, "trackingToken")
     last4 = re.sub(r"\D", "", str(body["mobileLast4"]))
     if len(last4) != 4:
@@ -396,7 +447,7 @@ def validate_tracking_query(body: dict) -> tuple[str, str, str]:
 class SlidingWindowRateLimiter:
     def __init__(self):
         self._lock = threading.Lock()
-        self._hits = defaultdict(list)
+        self._hits: dict[str, list[float]] = defaultdict(list)
 
     def check(self, key: str, max_requests: int, window_seconds: int) -> tuple[bool, int]:
         now = time.time()

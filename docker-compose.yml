@@ -1,0 +1,43 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3001"
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      PANCHAYAT_SESSION_SECRET: ${PANCHAYAT_SESSION_SECRET:?PANCHAYAT_SESSION_SECRET must be set (>= 32 chars)}
+      PANCHAYAT_SECRETARY_PASSCODE: ${PANCHAYAT_SECRETARY_PASSCODE:-}
+      PANCHAYAT_ALLOWED_ORIGINS: ${PANCHAYAT_ALLOWED_ORIGINS:-http://localhost:3000}
+      PANCHAYAT_LOG_LEVEL: ${PANCHAYAT_LOG_LEVEL:-INFO}
+      DATABASE_URL: ${DATABASE_URL:-sqlite:////app/backend/data/panchayat.db}
+    volumes:
+      - panchayat_data:/app/backend/data
+      - panchayat_backups:/app/backend/backups
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3001/api/ready', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["postgres"]
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-panchayat}
+      POSTGRES_USER: ${POSTGRES_USER:-panchayat}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_in_env}
+    volumes:
+      - panchayat_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-panchayat}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  panchayat_data:
+  panchayat_backups:
+  panchayat_pgdata:

@@ -360,6 +360,16 @@ export const CATEGORY_ML = {
 };
 
 export const STATUS_ML = {
+  SUBMITTED: 'സമർപ്പിച്ചു',
+  ACKNOWLEDGED: 'കൈപ്പറ്റി',
+  ASSIGNED: 'ഉദ്യോഗസ്ഥന് നൽകി',
+  IN_PROGRESS: 'നടപടി പുരോഗമിക്കുന്നു',
+  ON_HOLD: 'താൽക്കാലികമായി നിർത്തി',
+  ESCALATED: 'ഉന്നതതലത്തിലേക്ക് മാറ്റി',
+  RESOLVED: 'പരിഹരിച്ചു',
+  CLOSED: 'അടച്ചുപൂട്ടി',
+  REJECTED: 'നിരസിച്ചു',
+  REOPENED: 'വീണ്ടും തുറന്നു',
   Pending: 'തീർപ്പാക്കാനുണ്ട്',
   'In Progress': 'നടപടി പുരോഗമിക്കുന്നു',
   'Field Inspection': 'ഫീൽഡ് പരിശോധന',
@@ -371,3 +381,19 @@ export const STATUS_ML = {
   'Correction Needed': 'തിരുത്തൽ ആവശ്യമാണ്',
   Approved: 'അംഗീകരിച്ചു',
 };
+
+export const GRIEVANCE_STATUS_LABELS = {
+  SUBMITTED: 'Submitted',
+  ACKNOWLEDGED: 'Acknowledged',
+  ASSIGNED: 'Assigned',
+  IN_PROGRESS: 'In Progress',
+  ON_HOLD: 'On Hold',
+  ESCALATED: 'Escalated',
+  RESOLVED: 'Resolved',
+  CLOSED: 'Closed',
+  REJECTED: 'Rejected',
+  REOPENED: 'Reopened',
+};
+
+export const PRIORITIES = ['LOW', 'NORMAL', 'HIGH', 'CRITICAL'];
+

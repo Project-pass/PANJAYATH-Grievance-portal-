@@ -2,8 +2,6 @@ import {
   observeFirebaseAuth,
   signInWithGoogleCloud,
   signOutGoogleCloud,
-  syncGrievanceToFirestore,
-  syncPublicOverviewToFirestore,
 } from './firebase.js';
 
 const CITIZEN_PERMISSIONS = {
@@ -14,14 +12,29 @@ const CITIZEN_PERMISSIONS = {
   canVerifyDocuments: false,
 };
 
+function readCookie(name) {
+  const prefix = `${name}=`;
+  const parts = String(document.cookie || '').split(';');
+  for (const part of parts) {
+    const trimmed = part.trim();
+    if (trimmed.startsWith(prefix)) {
+      return decodeURIComponent(trimmed.slice(prefix.length));
+    }
+  }
+  return null;
+}
+
 export const store = {
   publicOverview: {
     slaLimitDays: 7,
+    categorySlaDays: {},
     stats: {
-      resolvedCount: 145,
-      avgDays: '3.2',
+      resolvedCount: 0,
+      totalCount: 0,
+      avgDays: '0.0',
       activeServicesCount: 6,
-      avgRating: '4.6',
+      avgRating: '0.0',
+      ratingCount: 0,
     },
     recentWorks: [],
     serviceCatalog: [],
@@ -33,13 +46,16 @@ export const store = {
     staff: [],
     auditLogs: [],
     securityAlerts: [],
+    notifications: [],
+    auditRetention: null,
   },
-  // Session token held strictly in memory (never localStorage or sessionStorage) alongside HttpOnly cookie
-  sessionToken: null,
+  // Session ID stays strictly inside HttpOnly cookie (`panchayat_sid`); JS holds only bound CSRF token
+  csrfToken: readCookie('panchayat_csrf'),
   currentUser: null,
   bootstrapRequired: false,
   envPasscodeConfigured: false,
   firebaseUser: null,
+  isSubmitting: false,
   language: 'en',
   portalMode: window.location.pathname.startsWith('/admin') ? 'admin' : 'citizen',
   citizenView: 'home',
@@ -55,6 +71,7 @@ export const store = {
   selectedService: null,
   submittedGrievance: null,
   submittedGrievanceToken: '',
+  submittedDuplicates: [],
   submittedService: null,
   submittedServiceToken: '',
   gPhotoPreview: '',
@@ -65,8 +82,11 @@ export const store = {
     status: 'ALL',
     ward: 'ALL',
     category: 'ALL',
+    priority: 'ALL',
     slaOverdueOnly: false,
     auditSearch: '',
+    page: 1,
+    pageSize: 25,
   },
   selectedGrievanceId: null,
   selectedServiceId: null,
@@ -115,14 +135,18 @@ export function canViewService(app) {
 }
 
 async function apiRequest(url, options = {}) {
+  const method = (options.method || 'GET').toUpperCase();
+  const isMutation = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method);
+  const csrf = store.csrfToken || readCookie('panchayat_csrf');
   const headers = {
     'Content-Type': 'application/json',
     'X-Requested-With': 'PanchayatPortal',
-    ...(store.sessionToken ? { Authorization: `Bearer ${store.sessionToken}` } : {}),
+    ...(isMutation && csrf ? { 'X-CSRF-Token': csrf } : {}),
     ...(options.headers || {}),
   };
   const res = await fetch(url, {
     ...options,
+    method,
     headers,
     credentials: 'same-origin',
     cache: 'no-store',
@@ -144,14 +168,11 @@ export async function refreshPublicOverview() {
   if (ovRes.ok && ovRes.data.ok) {
     store.publicOverview = {
       slaLimitDays: ovRes.data.slaLimitDays || 7,
+      categorySlaDays: ovRes.data.categorySlaDays || {},
       stats: ovRes.data.stats || store.publicOverview.stats,
       recentWorks: ovRes.data.recentWorks || [],
       serviceCatalog: ovRes.data.serviceCatalog || [],
     };
-    syncPublicOverviewToFirestore({
-      ...store.publicOverview.stats,
-      slaLimitDays: store.publicOverview.slaLimitDays,
-    }).catch(() => {});
   }
   if (authRes.ok && authRes.data.ok) {
     store.bootstrapRequired = Boolean(authRes.data.bootstrapRequired);
@@ -176,9 +197,11 @@ export async function refreshStaffDashboard() {
       staff: res.data.staff || [],
       auditLogs: res.data.auditLogs || [],
       securityAlerts: res.data.securityAlerts || [],
+      notifications: res.data.notifications || [],
+      auditRetention: res.data.auditRetention || null,
     };
   } else if (res.status === 401) {
-    store.sessionToken = null;
+    store.csrfToken = null;
     store.currentUser = null;
   }
   notify();
@@ -190,7 +213,7 @@ export async function bootstrapClaimSecretary(passcode) {
     body: JSON.stringify({ passcode }),
   });
   if (res.ok && res.data.ok) {
-    store.sessionToken = res.data.token || null;
+    store.csrfToken = res.data.csrfToken || readCookie('panchayat_csrf');
     store.currentUser = res.data.user;
     store.bootstrapRequired = false;
     await refreshStaffDashboard();
@@ -205,7 +228,7 @@ export async function loginWithCredentials(identifier, passcode) {
     body: JSON.stringify({ identifier, passcode }),
   });
   if (res.ok && res.data.ok) {
-    store.sessionToken = res.data.token || null;
+    store.csrfToken = res.data.csrfToken || readCookie('panchayat_csrf');
     store.currentUser = res.data.user;
     await refreshStaffDashboard();
     return { ok: true };
@@ -215,7 +238,7 @@ export async function loginWithCredentials(identifier, passcode) {
 
 export async function logoutStaff() {
   await apiRequest('/api/auth/logout', { method: 'POST', body: JSON.stringify({}) });
-  store.sessionToken = null;
+  store.csrfToken = null;
   store.currentUser = null;
   store.staffDashboard = {
     slaLimitDays: store.publicOverview.slaLimitDays,
@@ -224,41 +247,80 @@ export async function logoutStaff() {
     staff: [],
     auditLogs: [],
     securityAlerts: [],
+    notifications: [],
+    auditRetention: null,
   };
   store.selectedGrievanceId = null;
   store.selectedServiceId = null;
   notify();
 }
 
-export async function submitGrievance(payload, asStaffWalkIn = false) {
-  const endpoint = asStaffWalkIn ? '/api/staff/grievances' : '/api/public/grievances';
-  const res = await apiRequest(endpoint, {
+export async function changeOwnPassword(currentPassword, newPassword) {
+  const res = await apiRequest('/api/staff/account/change-password', {
     method: 'POST',
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ currentPassword, newPassword }),
   });
-  if (res.ok && res.data.ok) {
-    store.submittedGrievanceToken = res.data.trackingToken || '';
-    if (!asStaffWalkIn && store.firebaseUser?.emailVerified) {
-      syncGrievanceToFirestore(res.data.ticket).catch(() => {});
+  if (res.ok) await refreshStaffDashboard();
+  return res.data;
+}
+
+export async function resetStaffPassword(staffId, newPassword) {
+  const res = await apiRequest(`/api/staff/users/${encodeURIComponent(staffId)}/reset-password`, {
+    method: 'POST',
+    body: JSON.stringify({ newPassword }),
+  });
+  if (res.ok) await refreshStaffDashboard();
+  return res.data;
+}
+
+export async function submitGrievance(payload, asStaffWalkIn = false) {
+  if (store.isSubmitting) return { ok: false, error: 'Submission already in progress.' };
+  store.isSubmitting = true;
+  notify();
+  try {
+    const endpoint = asStaffWalkIn ? '/api/staff/grievances' : '/api/public/grievances';
+    const res = await apiRequest(endpoint, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    if (res.ok && res.data.ok) {
+      store.submittedGrievanceToken = res.data.trackingToken || '';
+      store.submittedDuplicates = res.data.potentialDuplicates || [];
+      await refreshPublicOverview();
+      return {
+        ok: true,
+        ticket: res.data.ticket,
+        trackingToken: res.data.trackingToken,
+        potentialDuplicates: res.data.potentialDuplicates || [],
+      };
     }
-    await refreshPublicOverview();
-    return { ok: true, ticket: res.data.ticket, trackingToken: res.data.trackingToken };
+    return { ok: false, error: res.data.error || 'Unable to submit grievance.' };
+  } finally {
+    store.isSubmitting = false;
+    notify();
   }
-  return { ok: false, error: res.data.error || 'Unable to submit grievance.' };
 }
 
 export async function submitServiceApplication(payload, asStaffWalkIn = false) {
-  const endpoint = asStaffWalkIn ? '/api/staff/services' : '/api/public/services';
-  const res = await apiRequest(endpoint, {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  });
-  if (res.ok && res.data.ok) {
-    store.submittedServiceToken = res.data.trackingToken || '';
-    await refreshPublicOverview();
-    return { ok: true, application: res.data.application, trackingToken: res.data.trackingToken };
+  if (store.isSubmitting) return { ok: false, error: 'Submission already in progress.' };
+  store.isSubmitting = true;
+  notify();
+  try {
+    const endpoint = asStaffWalkIn ? '/api/staff/services' : '/api/public/services';
+    const res = await apiRequest(endpoint, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    if (res.ok && res.data.ok) {
+      store.submittedServiceToken = res.data.trackingToken || '';
+      await refreshPublicOverview();
+      return { ok: true, application: res.data.application, trackingToken: res.data.trackingToken };
+    }
+    return { ok: false, error: res.data.error || 'Unable to submit service application.' };
+  } finally {
+    store.isSubmitting = false;
+    notify();
   }
-  return { ok: false, error: res.data.error || 'Unable to submit service application.' };
 }
 
 export async function trackApplication(trackingId, trackingToken, mobileLast4) {
@@ -300,10 +362,47 @@ export async function submitFeedback(ticketId, rating, comment) {
   return res.data;
 }
 
+export async function reopenGrievance(ticketId, reason) {
+  const res = await apiRequest(
+    `/api/public/grievances/${encodeURIComponent(ticketId)}/reopen`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        trackingToken: store.trackToken,
+        mobileLast4: store.trackMobileLast4,
+        reason,
+      }),
+    }
+  );
+  if (res.ok && res.data.ok) {
+    store.trackedRecord = res.data.record;
+    await refreshPublicOverview();
+  }
+  return res.data;
+}
+
 export async function updateGrievance(ticketId, patch) {
   const res = await apiRequest(`/api/staff/grievances/${encodeURIComponent(ticketId)}`, {
     method: 'PATCH',
     body: JSON.stringify(patch),
+  });
+  if (res.ok) await refreshStaffDashboard();
+  return res.data;
+}
+
+export async function addGrievanceComment(ticketId, body, isInternal = false) {
+  const res = await apiRequest(`/api/staff/grievances/${encodeURIComponent(ticketId)}/comments`, {
+    method: 'POST',
+    body: JSON.stringify({ body, isInternal }),
+  });
+  if (res.ok) await refreshStaffDashboard();
+  return res.data;
+}
+
+export async function escalateOverdueGrievances() {
+  const res = await apiRequest('/api/staff/grievances/escalate-overdue', {
+    method: 'POST',
+    body: JSON.stringify({}),
   });
   if (res.ok) await refreshStaffDashboard();
   return res.data;
@@ -367,7 +466,7 @@ export async function maintenanceReset(confirmPhrase, maintenanceKey = '') {
     body: JSON.stringify(payload),
   });
   if (res.ok) {
-    store.sessionToken = null;
+    store.csrfToken = null;
     store.currentUser = null;
     store.portalMode = 'citizen';
     store.citizenView = 'home';

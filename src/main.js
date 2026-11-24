@@ -85,3 +85,27 @@ function renderApp() {
 subscribe(renderApp);
 renderApp();
 refreshPublicOverview();
+
+window.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  let changed = false;
+  if (store.selectedGrievanceId || store.selectedServiceId) {
+    store.selectedGrievanceId = null;
+    store.selectedServiceId = null;
+    changed = true;
+  }
+  if (store.staffModalOpen) {
+    store.staffModalOpen = false;
+    changed = true;
+  }
+  if (store.walkInType) {
+    store.walkInType = null;
+    changed = true;
+  }
+  if (store.mobileMenuOpen || store.mobileSidebarOpen) {
+    store.mobileMenuOpen = false;
+    store.mobileSidebarOpen = false;
+    changed = true;
+  }
+  if (changed) notify();
+});

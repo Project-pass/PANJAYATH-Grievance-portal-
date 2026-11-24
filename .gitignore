@@ -4,5 +4,29 @@ dist/
 coverage/
 .DS_Store
 *.log
-.env*
+.env
+.env.*
 !.env.example
+
+# Python & C build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.ruff_cache/
+backend/c_engine/sla_rbac
+backend/c_engine/sla_rbac.exe
+backend/c_engine/*.o
+
+# Runtime databases, secrets, backups & audit logs
+backend/data/
+backend/backups/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.jsonl
+*.pem
+*.key
+.session_secret

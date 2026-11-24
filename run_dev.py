@@ -1,19 +1,20 @@
+import os
 import signal
 import subprocess
 import sys
-import os
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-C_SRC = os.path.join(ROOT, "backend", "c_engine", "sla_rbac.c")
-C_BIN = os.path.join(ROOT, "backend", "c_engine", "sla_rbac")
+BACKEND_DIR = os.path.join(ROOT, "backend")
+if BACKEND_DIR not in sys.path:
+    sys.path.insert(0, BACKEND_DIR)
+
+from c_engine.build import ensure_c_engine_ready  # noqa: E402
 
 
 def main():
-    # Ensure C SLA/RBAC binary is compiled
-    if not os.path.exists(C_BIN):
-        subprocess.run(["gcc", "-O2", C_SRC, "-o", C_BIN], check=True)
+    ensure_c_engine_ready()
 
-    py_proc = subprocess.Popen([sys.executable, os.path.join(ROOT, "backend", "server.py"), "--port", "3001"])
+    py_proc = subprocess.Popen([sys.executable, os.path.join(BACKEND_DIR, "server.py"), "--port", "3001"])
     vite_proc = subprocess.Popen(["npx", "vite", "--port=3000", "--host=0.0.0.0"])
 
     def shutdown(*_args):

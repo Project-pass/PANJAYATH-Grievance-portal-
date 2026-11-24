@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
@@ -5,20 +7,26 @@ import os
 import sqlite3
 import threading
 import time
+import uuid
 
+from app.core.config import DATA_DIR as CFG_DATA_DIR, load_settings
+from app.core.logging import get_request_id
+from app.policies.rbac import normalize_grievance_status
+from app.services.sla import DEFAULT_CATEGORY_SLA_DAYS, resolve_effective_sla_limit
 from security_utils import generate_tracking_token, hash_passcode, hash_token
-from seed_data import get_initial_state
+from seed_data import CATEGORY_DEPARTMENT_MAP, get_initial_state
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "data")
-SQLITE_PATH = os.path.join(DATA_DIR, "panchayat.db")
+DATA_DIR = str(CFG_DATA_DIR)
+_SETTINGS = load_settings()
+SQLITE_PATH = str(_SETTINGS.sqlite_path)
 LEGACY_JSON_PATH = os.path.join(DATA_DIR, "portal_db.json")
-AUDIT_JSONL_PATH = os.path.join(DATA_DIR, "audit_log.jsonl")
+AUDIT_JSONL_PATH = str(_SETTINGS.audit_jsonl_path)
 
 DB_WRITE_LOCK = threading.Lock()
 
 
-def now_iso():
+def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
@@ -46,6 +54,47 @@ def transaction(conn: sqlite3.Connection):
             raise
 
 
+V3_GRIEVANCES_DDL = """
+CREATE TABLE IF NOT EXISTS grievances (
+    id TEXT PRIMARY KEY,
+    external_uuid TEXT UNIQUE,
+    citizen_name TEXT NOT NULL,
+    mobile TEXT NOT NULL,
+    mobile_last4 TEXT NOT NULL CHECK(length(mobile_last4) = 4),
+    ward INTEGER NOT NULL CHECK(ward BETWEEN 1 AND 15),
+    category TEXT NOT NULL,
+    department TEXT NOT NULL,
+    priority TEXT NOT NULL DEFAULT 'NORMAL' CHECK(priority IN ('LOW','NORMAL','HIGH','CRITICAL')),
+    sla_limit_days INTEGER NOT NULL DEFAULT 7 CHECK(sla_limit_days BETWEEN 1 AND 30),
+    paused_seconds INTEGER NOT NULL DEFAULT 0 CHECK(paused_seconds >= 0),
+    hold_started_at TEXT,
+    escalated_at TEXT,
+    escalation_level INTEGER NOT NULL DEFAULT 0 CHECK(escalation_level >= 0),
+    consent_recorded INTEGER NOT NULL DEFAULT 1 CHECK(consent_recorded IN (0,1)),
+    landmark TEXT NOT NULL,
+    description TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN (
+        'SUBMITTED','ACKNOWLEDGED','ASSIGNED','IN_PROGRESS','ON_HOLD',
+        'ESCALATED','RESOLVED','CLOSED','REJECTED','REOPENED'
+    )),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    resolved_at TEXT,
+    assigned_officer_id TEXT REFERENCES staff(id) ON DELETE SET NULL,
+    assigned_officer_name TEXT,
+    filed_by_role TEXT NOT NULL,
+    before_photo_url TEXT,
+    after_photo_url TEXT,
+    public_remark TEXT,
+    internal_remark TEXT,
+    rating INTEGER CHECK(rating IS NULL OR (rating BETWEEN 1 AND 5)),
+    feedback_comment TEXT,
+    timeline_json TEXT NOT NULL,
+    tracking_token_hash TEXT NOT NULL
+);
+"""
+
+
 MIGRATIONS = [
     (
         1,
@@ -63,6 +112,7 @@ MIGRATIONS = [
 
         CREATE TABLE IF NOT EXISTS staff (
             id TEXT PRIMARY KEY,
+            external_uuid TEXT UNIQUE,
             name TEXT NOT NULL,
             username TEXT UNIQUE,
             email TEXT UNIQUE NOT NULL,
@@ -82,6 +132,7 @@ MIGRATIONS = [
 
         CREATE TABLE IF NOT EXISTS sessions (
             token_hash TEXT PRIMARY KEY,
+            csrf_token_hash TEXT,
             staff_id TEXT NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
             role TEXT NOT NULL,
             created_at REAL NOT NULL,
@@ -90,36 +141,12 @@ MIGRATIONS = [
             ip_hash TEXT NOT NULL,
             token_prefix TEXT NOT NULL
         );
-
-        CREATE TABLE IF NOT EXISTS grievances (
-            id TEXT PRIMARY KEY,
-            citizen_name TEXT NOT NULL,
-            mobile TEXT NOT NULL,
-            mobile_last4 TEXT NOT NULL CHECK(length(mobile_last4) = 4),
-            ward INTEGER NOT NULL CHECK(ward BETWEEN 1 AND 15),
-            category TEXT NOT NULL,
-            department TEXT NOT NULL,
-            landmark TEXT NOT NULL,
-            description TEXT NOT NULL,
-            status TEXT NOT NULL CHECK(status IN ('Pending','In Progress','Field Inspection','Resolved','Rejected')),
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            resolved_at TEXT,
-            assigned_officer_id TEXT REFERENCES staff(id) ON DELETE SET NULL,
-            assigned_officer_name TEXT,
-            filed_by_role TEXT NOT NULL,
-            before_photo_url TEXT,
-            after_photo_url TEXT,
-            public_remark TEXT,
-            internal_remark TEXT,
-            rating INTEGER CHECK(rating IS NULL OR (rating BETWEEN 1 AND 5)),
-            feedback_comment TEXT,
-            timeline_json TEXT NOT NULL,
-            tracking_token_hash TEXT NOT NULL
-        );
-
+        """
+        + V3_GRIEVANCES_DDL
+        + """
         CREATE TABLE IF NOT EXISTS services (
             id TEXT PRIMARY KEY,
+            external_uuid TEXT UNIQUE,
             service_id TEXT NOT NULL,
             service_name TEXT NOT NULL,
             applicant_name TEXT NOT NULL,
@@ -145,6 +172,7 @@ MIGRATIONS = [
         CREATE TABLE IF NOT EXISTS audit_logs (
             id TEXT PRIMARY KEY,
             timestamp TEXT NOT NULL,
+            request_id TEXT NOT NULL DEFAULT '-',
             actor_id TEXT NOT NULL,
             actor_name TEXT NOT NULL,
             actor_role TEXT NOT NULL,
@@ -202,7 +230,227 @@ MIGRATIONS = [
         UPDATE staff SET username = 'deepak_csc' WHERE id = 'stf-deepak' AND (username IS NULL OR username = '');
         """,
     ),
+    (
+        3,
+        """
+        CREATE TABLE IF NOT EXISTS wards (
+            ward_number INTEGER PRIMARY KEY CHECK(ward_number BETWEEN 1 AND 15),
+            name TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS departments (
+            name TEXT PRIMARY KEY,
+            head_designation TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS grievance_categories (
+            name TEXT PRIMARY KEY,
+            department TEXT NOT NULL REFERENCES departments(name) ON UPDATE CASCADE,
+            default_sla_days INTEGER NOT NULL CHECK(default_sla_days BETWEEN 1 AND 30)
+        );
+
+        CREATE TABLE IF NOT EXISTS sla_policies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT NOT NULL,
+            priority TEXT NOT NULL CHECK(priority IN ('LOW','NORMAL','HIGH','CRITICAL')),
+            deadline_days INTEGER NOT NULL CHECK(deadline_days BETWEEN 1 AND 30),
+            UNIQUE(category, priority)
+        );
+
+        CREATE TABLE IF NOT EXISTS holidays (
+            holiday_date TEXT PRIMARY KEY,
+            label TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS grievance_status_history (
+            id TEXT PRIMARY KEY,
+            grievance_id TEXT NOT NULL REFERENCES grievances(id) ON DELETE CASCADE,
+            from_status TEXT,
+            to_status TEXT NOT NULL,
+            actor_id TEXT NOT NULL,
+            actor_name TEXT NOT NULL,
+            actor_role TEXT NOT NULL,
+            remark TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS grievance_assignments (
+            id TEXT PRIMARY KEY,
+            grievance_id TEXT NOT NULL REFERENCES grievances(id) ON DELETE CASCADE,
+            officer_id TEXT REFERENCES staff(id) ON DELETE SET NULL,
+            officer_name TEXT,
+            assigned_by_id TEXT NOT NULL,
+            assigned_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS grievance_comments (
+            id TEXT PRIMARY KEY,
+            grievance_id TEXT NOT NULL REFERENCES grievances(id) ON DELETE CASCADE,
+            author_id TEXT NOT NULL,
+            author_name TEXT NOT NULL,
+            is_internal INTEGER NOT NULL DEFAULT 0 CHECK(is_internal IN (0,1)),
+            body TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS attachments (
+            id TEXT PRIMARY KEY,
+            target_kind TEXT NOT NULL CHECK(target_kind IN ('grievance','service')),
+            target_id TEXT NOT NULL,
+            file_name TEXT NOT NULL,
+            mime_type TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL DEFAULT 0,
+            storage_ref TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS notifications (
+            id TEXT PRIMARY KEY,
+            recipient_role TEXT NOT NULL,
+            recipient_ref TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            channel TEXT NOT NULL DEFAULT 'IN_APP',
+            message TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'SENT' CHECK(status IN ('QUEUED','SENT','FAILED')),
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_grievances_ward_dept_status ON grievances(ward, department, status);
+        CREATE INDEX IF NOT EXISTS idx_grievances_created_at ON grievances(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_grievances_uuid ON grievances(external_uuid);
+        CREATE INDEX IF NOT EXISTS idx_services_ward_dept_status ON services(ward, department, status);
+        CREATE INDEX IF NOT EXISTS idx_services_uuid ON services(external_uuid);
+        CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_logs(timestamp DESC);
+        CREATE INDEX IF NOT EXISTS idx_status_hist_gid ON grievance_status_history(grievance_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_notifications_target ON notifications(target_id, created_at DESC);
+        """,
+    ),
 ]
+
+
+def _seed_reference_tables(conn: sqlite3.Connection):
+    for w in range(1, 16):
+        conn.execute(
+            "INSERT OR IGNORE INTO wards(ward_number, name) VALUES (?, ?)",
+            (w, f"Ward {w}"),
+        )
+
+    depts = [
+        ("General Administration", "Panchayat Secretary"),
+        ("Roads & Streetlights", "Assistant Engineer"),
+        ("Water & Sanitation", "Water & Sanitation Inspector"),
+        ("Public Health", "Public Health Officer"),
+        ("Revenue & Certificates", "Senior Revenue Clerk"),
+        ("Building & Planning", "Town Planning Overseer"),
+    ]
+    for name, head in depts:
+        conn.execute(
+            "INSERT OR IGNORE INTO departments(name, head_designation) VALUES (?, ?)",
+            (name, head),
+        )
+
+    for cat, days in DEFAULT_CATEGORY_SLA_DAYS.items():
+        dept = CATEGORY_DEPARTMENT_MAP.get(cat, "General Administration")
+        conn.execute(
+            "INSERT OR IGNORE INTO grievance_categories(name, department, default_sla_days) VALUES (?, ?, ?)",
+            (cat, dept, days),
+        )
+        for pr in ("LOW", "NORMAL", "HIGH", "CRITICAL"):
+            eff = resolve_effective_sla_limit(cat, pr, days)
+            conn.execute(
+                "INSERT OR IGNORE INTO sla_policies(category, priority, deadline_days) VALUES (?, ?, ?)",
+                (cat, pr, eff),
+            )
+
+    for hdate, label in (
+        ("2026-01-26", "Republic Day"),
+        ("2026-08-15", "Independence Day"),
+        ("2026-10-02", "Gandhi Jayanti"),
+        ("2026-12-25", "Christmas Day"),
+    ):
+        conn.execute(
+            "INSERT OR IGNORE INTO holidays(holiday_date, label) VALUES (?, ?)",
+            (hdate, label),
+        )
+
+
+def _apply_v3_table_upgrades(conn: sqlite3.Connection):
+    staff_cols = {r["name"] for r in conn.execute("PRAGMA table_info(staff)").fetchall()}
+    if "external_uuid" not in staff_cols:
+        conn.execute("ALTER TABLE staff ADD COLUMN external_uuid TEXT;")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_staff_uuid ON staff(external_uuid);")
+
+    sess_cols = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+    if "csrf_token_hash" not in sess_cols:
+        conn.execute("ALTER TABLE sessions ADD COLUMN csrf_token_hash TEXT;")
+
+    srv_cols = {r["name"] for r in conn.execute("PRAGMA table_info(services)").fetchall()}
+    if "external_uuid" not in srv_cols:
+        conn.execute("ALTER TABLE services ADD COLUMN external_uuid TEXT;")
+
+    aud_cols = {r["name"] for r in conn.execute("PRAGMA table_info(audit_logs)").fetchall()}
+    if "request_id" not in aud_cols:
+        conn.execute("ALTER TABLE audit_logs ADD COLUMN request_id TEXT NOT NULL DEFAULT '-';")
+
+    grv_cols = {r["name"] for r in conn.execute("PRAGMA table_info(grievances)").fetchall()}
+    if "external_uuid" not in grv_cols:
+        # Rebuild grievances cleanly with canonical CHECK statuses & new SLA/workflow columns
+        conn.execute("PRAGMA foreign_keys = OFF;")
+        conn.execute("DROP TABLE IF EXISTS grievances_v3;")
+        conn.execute(V3_GRIEVANCES_DDL.replace("CREATE TABLE IF NOT EXISTS grievances", "CREATE TABLE grievances_v3"))
+        rows = conn.execute("SELECT * FROM grievances").fetchall()
+        for r in rows:
+            canonical_st = normalize_grievance_status(r["status"])
+            cat_limit = DEFAULT_CATEGORY_SLA_DAYS.get(r["category"], 7)
+            conn.execute(
+                """
+                INSERT INTO grievances_v3(
+                    id, external_uuid, citizen_name, mobile, mobile_last4, ward, category, department,
+                    priority, sla_limit_days, paused_seconds, hold_started_at, escalated_at,
+                    escalation_level, consent_recorded, landmark, description, status,
+                    created_at, updated_at, resolved_at, assigned_officer_id, assigned_officer_name,
+                    filed_by_role, before_photo_url, after_photo_url, public_remark, internal_remark,
+                    rating, feedback_comment, timeline_json, tracking_token_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'NORMAL', ?, 0, NULL, NULL, 0, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    r["id"],
+                    str(uuid.uuid4()),
+                    r["citizen_name"],
+                    r["mobile"],
+                    r["mobile_last4"],
+                    r["ward"],
+                    r["category"],
+                    r["department"],
+                    cat_limit,
+                    r["landmark"],
+                    r["description"],
+                    canonical_st,
+                    r["created_at"],
+                    r["updated_at"],
+                    r["resolved_at"],
+                    r["assigned_officer_id"],
+                    r["assigned_officer_name"],
+                    r["filed_by_role"],
+                    r["before_photo_url"],
+                    r["after_photo_url"],
+                    r["public_remark"],
+                    r["internal_remark"],
+                    r["rating"],
+                    r["feedback_comment"],
+                    r["timeline_json"],
+                    r["tracking_token_hash"],
+                ),
+            )
+        conn.execute("DROP TABLE grievances;")
+        conn.execute("ALTER TABLE grievances_v3 RENAME TO grievances;")
+        conn.execute("PRAGMA foreign_keys = ON;")
+
+    # Backfill UUIDs for any remaining rows
+    for tbl in ("staff", "grievances", "services"):
+        missing = conn.execute(f"SELECT id FROM {tbl} WHERE external_uuid IS NULL OR external_uuid = ''").fetchall()
+        for row in missing:
+            conn.execute(f"UPDATE {tbl} SET external_uuid = ? WHERE id = ?", (str(uuid.uuid4()), row["id"]))
 
 
 def _seed_tables(conn: sqlite3.Connection):
@@ -224,13 +472,14 @@ def _seed_tables(conn: sqlite3.Connection):
         conn.execute(
             """
             INSERT INTO staff(
-                id, name, username, email, passcode_hash, designation, role, department,
+                id, external_uuid, name, username, email, passcode_hash, designation, role, department,
                 assigned_wards_json, is_active, permissions_json,
                 failed_attempts, locked_until, is_claimed, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
             """,
             (
                 s["id"],
+                str(uuid.uuid4()),
                 s["name"],
                 s.get("username"),
                 s["email"].lower(),
@@ -248,29 +497,33 @@ def _seed_tables(conn: sqlite3.Connection):
         )
 
     for g in seed.get("grievances", []):
-        # Seed records receive random high-entropy tracking tokens (hashed) so sequential IDs do not disclose PII
         tk_hash = hash_token(generate_tracking_token())
+        canonical_st = normalize_grievance_status(g["status"])
+        sla_days = DEFAULT_CATEGORY_SLA_DAYS.get(g["category"], 7)
         conn.execute(
             """
             INSERT INTO grievances(
-                id, citizen_name, mobile, mobile_last4, ward, category, department,
-                landmark, description, status, created_at, updated_at, resolved_at,
-                assigned_officer_id, assigned_officer_name, filed_by_role,
-                before_photo_url, after_photo_url, public_remark, internal_remark,
+                id, external_uuid, citizen_name, mobile, mobile_last4, ward, category, department,
+                priority, sla_limit_days, paused_seconds, hold_started_at, escalated_at,
+                escalation_level, consent_recorded, landmark, description, status,
+                created_at, updated_at, resolved_at, assigned_officer_id, assigned_officer_name,
+                filed_by_role, before_photo_url, after_photo_url, public_remark, internal_remark,
                 rating, feedback_comment, timeline_json, tracking_token_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'NORMAL', ?, 0, NULL, NULL, 0, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 g["id"],
+                str(uuid.uuid4()),
                 g["citizenName"],
                 g["mobile"],
                 g["mobile"][-4:],
                 int(g["ward"]),
                 g["category"],
                 g["department"],
+                sla_days,
                 g["landmark"],
                 g["description"],
-                g["status"],
+                canonical_st,
                 g["createdAt"],
                 g["updatedAt"],
                 g.get("resolvedAt"),
@@ -287,21 +540,30 @@ def _seed_tables(conn: sqlite3.Connection):
                 tk_hash,
             ),
         )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO grievance_status_history(
+                id, grievance_id, from_status, to_status, actor_id, actor_name, actor_role, remark, created_at
+            ) VALUES (?, ?, NULL, ?, 'seed', 'System Seed', 'SYSTEM', ?, ?)
+            """,
+            (f"gsh-{g['id']}", g["id"], canonical_st, g.get("publicRemark") or "Registered", g["createdAt"]),
+        )
 
     for srv in seed.get("services", []):
         tk_hash = hash_token(generate_tracking_token())
         conn.execute(
             """
             INSERT INTO services(
-                id, service_id, service_name, applicant_name, mobile, mobile_last4,
+                id, external_uuid, service_id, service_name, applicant_name, mobile, mobile_last4,
                 ward, address, department, fee_inr, status, created_at, updated_at,
                 checked_docs_json, uploaded_doc_names_json, assigned_officer_id,
                 assigned_officer_name, filed_by_role, official_remark, timeline_json,
                 tracking_token_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 srv["id"],
+                str(uuid.uuid4()),
                 srv["serviceId"],
                 srv["serviceName"],
                 srv["applicantName"],
@@ -329,9 +591,9 @@ def _seed_tables(conn: sqlite3.Connection):
         conn.execute(
             """
             INSERT INTO audit_logs(
-                id, timestamp, actor_id, actor_name, actor_role, session_prefix,
+                id, timestamp, request_id, actor_id, actor_name, actor_role, session_prefix,
                 ip_hash, action, target_id, outcome, details
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, 'seed', ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 aud["id"],
@@ -350,7 +612,6 @@ def _seed_tables(conn: sqlite3.Connection):
 
 
 def init_db(db_path: str = SQLITE_PATH):
-    # Remove legacy flat JSON containing plaintext PINs if present
     if os.path.exists(LEGACY_JSON_PATH):
         try:
             os.remove(LEGACY_JSON_PATH)
@@ -370,19 +631,21 @@ def init_db(db_path: str = SQLITE_PATH):
             for version, sql in MIGRATIONS:
                 if version not in applied:
                     if version == 2:
-                        cols = {
-                            r["name"]
-                            for r in conn.execute("PRAGMA table_info(staff)").fetchall()
-                        }
+                        cols = {r["name"] for r in conn.execute("PRAGMA table_info(staff)").fetchall()}
                         if "username" not in cols:
                             conn.execute("ALTER TABLE staff ADD COLUMN username TEXT;")
+                    if version == 3:
+                        _apply_v3_table_upgrades(conn)
                     conn.executescript(sql)
+                    if version == 3:
+                        _seed_reference_tables(conn)
                     conn.execute(
                         "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                         (version, now_iso()),
                     )
 
         with transaction(conn):
+            _seed_reference_tables(conn)
             staff_count = conn.execute("SELECT COUNT(*) AS c FROM staff").fetchone()["c"]
             if staff_count == 0:
                 _seed_tables(conn)
@@ -401,10 +664,13 @@ def append_audit_event(
     target_id: str,
     outcome: str,
     details: str,
+    request_id: str | None = None,
 ):
+    req_id = request_id or get_request_id()
     evt = {
         "id": f"aud-{int(time.time() * 1000)}-{os.getpid()}-{hash(details) & 0xffff:04x}",
         "timestamp": now_iso(),
+        "requestId": req_id,
         "actorId": actor_id,
         "actorName": actor_name,
         "actorRole": actor_role,
@@ -418,13 +684,14 @@ def append_audit_event(
     conn.execute(
         """
         INSERT INTO audit_logs(
-            id, timestamp, actor_id, actor_name, actor_role, session_prefix,
+            id, timestamp, request_id, actor_id, actor_name, actor_role, session_prefix,
             ip_hash, action, target_id, outcome, details
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             evt["id"],
             evt["timestamp"],
+            evt["requestId"],
             evt["actorId"],
             evt["actorName"],
             evt["actorRole"],
@@ -436,8 +703,9 @@ def append_audit_event(
             evt["details"],
         ),
     )
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(AUDIT_JSONL_PATH, "a", encoding="utf-8") as f:
+    audit_path = AUDIT_JSONL_PATH
+    os.makedirs(os.path.dirname(audit_path), exist_ok=True)
+    with open(audit_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(evt) + "\n")
     return evt
 
@@ -469,10 +737,16 @@ def reset_database_with_audit(
     ip_hash: str,
 ):
     conn.execute("DELETE FROM sessions;")
+    conn.execute("DELETE FROM grievance_status_history;")
+    conn.execute("DELETE FROM grievance_assignments;")
+    conn.execute("DELETE FROM grievance_comments;")
+    conn.execute("DELETE FROM notifications;")
+    conn.execute("DELETE FROM attachments;")
     conn.execute("DELETE FROM grievances;")
     conn.execute("DELETE FROM services;")
     conn.execute("DELETE FROM staff;")
     conn.execute("DELETE FROM config;")
+    _seed_reference_tables(conn)
     _seed_tables(conn)
     append_audit_event(
         conn,

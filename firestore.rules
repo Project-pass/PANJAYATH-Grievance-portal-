@@ -60,11 +60,16 @@ service cloud.firestore {
 
     function isValidGrievanceStatus(st) {
       return st is string && st.size() <= 40 && st in [
-        'Pending',
-        'In Progress',
-        'Field Inspection',
-        'Resolved',
-        'Rejected'
+        'SUBMITTED',
+        'ACKNOWLEDGED',
+        'ASSIGNED',
+        'IN_PROGRESS',
+        'ON_HOLD',
+        'ESCALATED',
+        'RESOLVED',
+        'CLOSED',
+        'REJECTED',
+        'REOPENED'
       ];
     }
 
@@ -254,7 +259,7 @@ service cloud.firestore {
 
     // Non-PII grievance summaries: readable when signed in for authenticated dashboard or specific resolved record
     match /grievance_summaries/{ticketId} {
-      allow get: if isValidId(ticketId) && (isSignedIn() || existing().status == 'Resolved');
+      allow get: if isValidId(ticketId) && (isSignedIn() || existing().status in ['RESOLVED', 'CLOSED']);
       allow list: if isSignedIn() && resource.data.ward >= 1 && resource.data.ward <= 15;
       allow create: if isVerifiedUser()
         && isValidId(ticketId)
@@ -284,7 +289,7 @@ service cloud.firestore {
         && isValidGrievancePrivate(incoming())
         && incoming().id == ticketId
         && incoming().ownerUid == request.auth.uid
-        && incoming().status == 'Pending'
+        && incoming().status == 'SUBMITTED'
         && !('internalRemark' in incoming())
         && !('assignedOfficerId' in incoming())
         && incoming().createdAt == request.time
@@ -300,7 +305,7 @@ service cloud.firestore {
           isAdmin()
           || (
             isActiveStaff()
-            && !(existing().status in ['Resolved', 'Rejected'])
+            && !(existing().status in ['RESOLVED', 'CLOSED', 'REJECTED'])
             && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'publicRemark', 'internalRemark', 'assignedOfficerId', 'updatedAt'])
           )
         );

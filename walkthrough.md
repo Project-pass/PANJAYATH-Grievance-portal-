@@ -1,158 +1,73 @@
 # Security Summary
 
-**Reviewed Files**: 17
-**Issues Resolved**: 11
+**Reviewed Areas**: Backend API, C SLA/RBAC Engine, Authentication & Session Transport, Input Validation, Database Migrations & Backups, Frontend Portals, and Cloud Rules
+**Status**: Hardened & Verified (30 automated Python tests passing, live runtime endpoints verified, Firestore rules deployed cleanly, frontend built and linted)
 
 ### Issues Resolved
-| Area | File | Line | What Was Happening | Impact | Status | How It Was Fixed |
-|---|---|---|---|---|---|---|
-| Unauthenticated State & Reset Exposure | `backend/server.py` | 483 | Legacy state and reset routes exposed all citizen/staff records and allowed unauthenticated database wipes. | High | Fixed | Removed legacy `/api/state` and `/api/reset`; split `/api/public/*` vs `/api/staff/*` routes and gated maintenance resets behind `SUPER_ADMIN` auth, explicit confirmation phrase, optional `PANCHAYAT_MAINTENANCE_KEY`, and non-production check (`backend/server.py:1456`). |
-| Plaintext PIN Storage & UI Leakage | `backend/seed_data.py` | 1 | Seed accounts and API/UI responses stored and displayed plaintext staff PINs and autofill buttons. | High | Fixed | Removed all plaintext PINs from `backend/seed_data.py`, `backend/db.py`, API DTOs, and `src/adminPortal.js`; hashed staff passcodes with `hashlib.scrypt` + per-user random salt (`backend/security_utils.py:72`) and added a first-run one-time Secretary setup claim (`POST /api/auth/bootstrap-claim`). |
-| Spoofable Staff Header Authentication | `backend/server.py` | 395 | Raw `X-Staff-Id` header or client-side role switcher could impersonate privileged staff accounts. | High | Fixed | Replaced with server-issued opaque session tokens + `HttpOnly; Secure; SameSite=None; Partitioned` cookies (`backend/server.py:437`); unauthenticated `X-Staff-Id` requests return `401` and trigger a `HIGH` `SPOOFED_AUTH_HEADER` alert (`backend/server.py:550`). |
-| Client Token & Cache Exposure | `src/store.js` | 38 | Session identity and cached portal state were stored in `localStorage`. | Medium | Fixed | Removed all `localStorage` session/record storage and role impersonation switching (`src/main.js`); keeps short-lived bearer token only in JavaScript memory alongside `HttpOnly` cookie transport. |
-| Sequential Citizen Tracking PII Leakage | `backend/server.py` | 900 | Predictable sequential IDs (`ABC-GRV-2026-101`) allowed anonymous lookup of citizen names, mobile numbers, and remarks. | High | Fixed | Generated per-ticket high-entropy verification tokens (`TK-*`, HMAC-SHA256 stored hashed in DB) requiring Tracking ID + Verification Token + Mobile Last 4 on `POST /api/public/track` (`backend/server.py:900`), returning masked citizen names (`mask_name`) and zero mobile/internal remarks. |
-| Missing Per-Record & Field-Level Authorization | `backend/server.py` | 567 | Staff queries and mutations needed strict server-side principal, ward, department, and permission-bit validation. | High | Fixed | Routed every view, walk-in, update, assignment, verification, certificate approval, user management, SLA update, and deletion through the compiled C RBAC matrix (`backend/c_engine/sla_rbac.c`) via `call_c_rbac` (`backend/server.py:118`) and applied field-level mobile masking for Ward Officers. |
-| Credential Fields in Response Objects | `backend/server.py` | 165 | Raw database rows risked leaking credential hashes or internal tokens if serialized directly. | Medium | Fixed | Introduced explicit response DTOs (`staff_self_dto`, `staff_directory_min_dto`, `public_grievance_summary_dto`, `citizen_tracked_grievance_dto`, `staff_grievance_dto`, `staff_service_dto`) excluding `passcode_hash` and `tracking_token_hash`. |
-| Missing Input Allowlists, Normalization & Size Caps | `backend/security_utils.py` | 163 | Payloads lacked strict unknown-field allowlists, control-character normalization, safe image URI filtering, and body size limits. | Medium | Fixed | Enforced strict key allowlists (`ensure_allowed_keys`), control-character stripping (`normalize_text`), strict `data:image/*` / local asset validation (`validate_photo_url`), and a 2 MB request body limit (`413 Payload Too Large`). |
-| Flat JSON Storage & Missing Constraints | `backend/db.py` | 25 | State persisted in an unindexed JSON file without schema constraints, migrations, backups, or append-only enforcement. | High | Fixed | Migrated to transactional SQLite WAL (`PRAGMA foreign_keys = ON`, `BEGIN IMMEDIATE`, schema migrations, `CHECK` constraints), deleted legacy `portal_db.json`, added `backend/maintenance.py` backup/restore-drill/retention CLI, and provisioned hardened Cloud Firestore rules (`firestore.rules`). |
-| Missing Brute-Force Lockout & Rate Limiting | `backend/server.py` | 448 | Auth and public submission endpoints lacked sliding-window throttling, progressive backoff, and account lockouts. | Medium | Fixed | Added per-IP sliding-window rate limits (`429 Too Many Requests` + `Retry-After`), exponential failure delay, and 5-attempt / 15-minute account lockouts (`423 Locked`) logged to `security_alerts`. |
-| Mutable Audit Trail & Missing HTTP Security Headers | `backend/db.py` | 156 | Audit events lacked database-level immutability, session prefixes, and hardened browser/CORS response headers. | Medium | Fixed | Added `BEFORE UPDATE`/`BEFORE DELETE` SQLite triggers (`trg_audit_no_update`, `trg_audit_no_delete`) + JSONL mirror, strict same-origin `Origin` checks (`403`), and `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`, `Strict-Transport-Security`, and `Cache-Control: no-store` headers. |
-
-### Safeguards Verified
-| Area | File | How It's Protected |
-|---|---|---|
-| Firebase & Firestore Security Rules | `firestore.rules` | Enforces default-deny catch-all (`allow read, write: if false`), verified email gates (`request.auth.token.email_verified == true`), strict field `hasAll`/`hasOnly` allowlists, `request.time` timestamp immutability, PII split collections (`grievance_summaries` vs `grievances_private`), terminal-state locks, and immutable `audit_logs`/`security_alerts`. Lint-verified cleanly with `@firebase/eslint-plugin-security-rules`. |
-| Transactional Persistence & Backups | `backend/db.py`, `backend/maintenance.py` | Uses parameterized SQL queries exclusively (`?` placeholders), `BEGIN IMMEDIATE` write transactions, `CHECK` constraints, SHA-256 backup manifests, and verified test-restore integrity (`PRAGMA integrity_check` = `ok`). |
-| C SLA & RBAC Policy Engine | `backend/c_engine/sla_rbac.c` | Validates CLI integer bounds strictly with `strtol` (no `atoi`) and evaluates role bitmasks, ward bitmasks, department match, and explicit action codes (`VIEW`, `CREATE_WALKIN`, `UPDATE`, `ASSIGN`, `VERIFY`, `APPROVE_CERT`, `MANAGE_USERS`, `DELETE`, `MANAGE_SLA`, `MAINTENANCE_RESET`). |
-| Dependency Audit | `package.json`, `bun.lock` | `bun audit` found zero direct vulnerabilities in application packages (`1 high`, `1 low` advisory only in transitive `@grpc/grpc-js@1.9.16` under `@firebase/firestore-compat`, unused by browser Web SDK / Python API). Status: `Needs Follow-Up` only if Node gRPC Firestore compat were later enabled on server. |
+| Area | File(s) | What Was Happening | Impact | Status | How It Was Fixed |
+|---|---|---|---|---|---|
+| C Engine Packaging & Permissions | `backend/c_engine/build.py`, `run_dev.py` | Missing executable bits or stale precompiled binaries could raise `PermissionError` or run outdated C logic. | High | Fixed | Implemented deterministic C builder (`needs_rebuild`, `build_c_engine`, `verify_c_engine`) checking file existence, `os.X_OK`, and source `mtime` (`-O2 -Wall -Wextra -Werror`) automatically on startup. |
+| Plaintext Credentials & Secret Fallback | `backend/app/core/config.py`, `backend/seed_data.py`, `backend/security_utils.py` | Plaintext passcodes/defaults and weak runtime secret fallbacks risked credential exposure. | High | Fixed | Removed all plaintext credentials; enforced `hashlib.scrypt` per-user salted hashes, one-time Secretary `bootstrap-claim` or env var, `APP_ENV=production` fail-fast check for `PANCHAYAT_SESSION_SECRET` (>= 32 chars), and `0600` `.session_secret` in dev. |
+| Token Exposure, Session Fixation & CSRF | `backend/server.py`, `src/store.js` | Session tokens returned in JSON or missing session-bound CSRF validation risked hijacking and cross-site actions. | High | Fixed | Enforced cookie-only `HttpOnly; Secure; SameSite=None; Partitioned` transport (`panchayat_sid`), deleted raw JSON `token` output, rotated sessions on login (`_issue_session`), revoked prior sessions on password change/reset/suspension, and verified `X-CSRF-Token` against `csrf_token_hash`. |
+| Unauthenticated State & Spoofing Headers | `backend/server.py` | Legacy state/reset paths and header-based identity spoofing threatened confidentiality and integrity. | High | Fixed | Removed legacy state/reset endpoints, blocked unauthenticated `X-Staff-Id` / `Authorization: Bearer` attempts with `401` and `HIGH` `SPOOFED_AUTH_HEADER` alerts, and restricted maintenance reset to non-production `SUPER_ADMIN` with confirmation phrase. |
+| Incomplete RBAC & Horizontal/Vertical Access | `backend/app/policies/rbac.py`, `backend/server.py` | Staff routes needed deny-by-default enforcement across ward, department, role, and permission flags. | High | Fixed | Routed every view, intake, update, assignment, verification, certificate approval, user update, SLA change, audit export, and deletion through deny-by-default RBAC policies with field-level mobile masking for Ward Officers. |
+| Weak Grievance Lifecycle & Fake Stats | `backend/app/policies/rbac.py`, `backend/app/services/sla.py`, `backend/app/services/workflow.py`, `src/citizenPortal.js` | Synthetic `+142` offsets skewed metrics and status/SLA logic lacked pause tracking, holidays, and transition guards. | Medium | Fixed | Implemented 10-state canonical workflow FSM with mandatory remarks, category+priority SLA deadlines excluding Sundays/holidays, `ON_HOLD` clock pausing, auto-escalation sweeps, and exact database-backed statistics. |
+| Predictable Tracking Enumeration & PII Leakage | `backend/server.py`, `backend/security_utils.py` | Sequential ticket IDs alone could leak citizen details. | High | Fixed | Issued high-entropy `TK-*` verification tokens stored via HMAC-SHA256, verified alongside `mobileLast4` using `hmac.compare_digest`, and isolated public/staff DTOs (`passcode_hash`, `tracking_token_hash`, `csrf_token_hash` excluded). |
+| Injection, Traversal, SSRF & Size Caps | `backend/security_utils.py`, `backend/server.py` | Payloads needed strict allowlists, traversal blocking, safe URL checks, and body caps. | Medium | Fixed | Enforced `ensure_allowed_keys`, control-char normalization, filename traversal rejection, `is_safe_external_https_url`, `validate_photo_url`, parameterized SQL queries, and 2 MB `413` limits. |
+| Brute-Force Lockout, Headers & Immutable Audit | `backend/server.py`, `backend/db.py`, `vite.config.js` | Missing progressive lockouts, CSP headers, and tamper-resistant audit retention. | High | Fixed | Added sliding-window rate limits (`429`), 5-attempt / 15-minute account lockouts (`423`), strict CSP & security headers, and `BEFORE UPDATE`/`BEFORE DELETE` SQLite abort triggers on `audit_logs` and `security_alerts`. |
+| Unverified Backups & Single-File Monolith | `backend/maintenance.py`, `scripts/*.sh`, `backend/app/` | Missing encrypted backup manifests, restore verification drills, and modular backend separation. | Medium | Fixed | Split backend into `core`, `policies`, `services`, `api`, and `database` packages; added PostgreSQL/Alembic schema; and verified online backups with SHA-256/HMAC manifests and `PRAGMA integrity_check` restore drills. |
 
 ---
 
 ## PoC Verification
 
-### 1. Spoofed `X-Staff-Id` Header & Unauthenticated Staff Access Blocked
-#### Summary
+### 1. C Engine Deterministic Build & Non-Executable Recovery
 | Field | Value |
 |---|---|
-| Issue Type | Missing Authentication / Header Spoofing |
-| Impact | High |
-| Affected File | `backend/server.py:395-403, 547-561` |
-| Test Scenario | `GET /api/staff/dashboard` sent with forged header `X-Staff-Id: stf-secretary` and no valid session token (`test_03_spoofed_staff_header_rejected_and_alert_logged`). |
+| Issue Type | Missing / Non-Executable / Stale Compiled Policy Binary |
+| Affected File | `backend/c_engine/build.py` |
+| Test Scenario | `test_02_non_executable_binary_detected_and_rebuilt` (`chmod 0644` on binary) and `test_03_outdated_binary_detected_via_mtime_and_rebuilt` |
+| Outcome | `needs_rebuild` detects missing `os.X_OK` or newer source `mtime`, recompiles with `-O2 -Wall -Wextra -Werror`, restores `0755`, and verifies output via `verify_c_engine`. |
 
-#### How It Was Fixed
-Authentication ignores `X-Staff-Id` completely, requires an HMAC-SHA256-hashed opaque session token via `Authorization: Bearer` or `HttpOnly` cookie `panchayat_sid`, and raises a `HIGH` severity security alert when raw `X-Staff-Id` spoofing is attempted.
-
-#### Step-by-Step Trace
-| Step | What Happens in the Code | Outcome |
-|---|---|---|
-| 1 | Forged request arrives at `do_GET` (`backend/server.py:547`). | Enters `/api/staff/dashboard` handler |
-| 2 | `_authenticate(conn)` detects `X-Staff-Id` with no Bearer/cookie token (`backend/server.py:397-400`). | Returns `(None, "spoof_header", "none")` |
-| 3 | Handler records `SPOOFED_AUTH_HEADER` in `security_alerts` (`backend/server.py:550-559`) and returns `401`. | **Handled Safely (`401 Unauthorized`)** |
-
-#### Conclusion
-**Fix Verified** - Raw staff IDs cannot establish or spoof an authenticated staff session.
-
----
-
-### 2. Cross-Ward / Cross-Department & Certificate Privilege Escalation Blocked
-#### Summary
+### 2. Cookie-Only Session, Fixation Protection & CSRF Rejection
 | Field | Value |
 |---|---|
-| Issue Type | Missing Per-Record & Action Authorization |
-| Impact | High |
-| Affected File | `backend/server.py:118-160, 1522-1533, 1648-1662`, `backend/c_engine/sla_rbac.c` |
-| Test Scenario | Authenticated `WARD_OFFICER` (Ward 1, `Water & Sanitation`, `canApproveCertificates=false`) attempts `PATCH /api/staff/grievances/ABC-GRV-2026-101` (Ward 4 Roads), `PATCH /api/staff/services/ABC-SRV-2026-201` (`status="Approved"`), `POST /api/staff/users`, `PUT /api/staff/config/sla`, and `DELETE` (`test_07_rbac_ward_and_dept_isolation_and_negative_tests`). |
+| Issue Type | Session Fixation / Cross-Site Request Forgery / Header Spoofing |
+| Affected File | `backend/server.py` |
+| Test Scenario | `test_03_bootstrap_cookie_only_auth_and_session_regeneration`, `test_02_spoofed_staff_and_bearer_headers_without_cookie_return_401`, and `test_03_csrf_token_and_origin_enforcement` |
+| Outcome | Login/bootstrap return no `token` in JSON, rotate away any prior `panchayat_sid` cookie (`401` on reuse), reject `X-Staff-Id` / `Bearer` without cookie (`401` + `HIGH` alert), and reject missing/invalid `X-CSRF-Token` or foreign `Origin` (`403`). |
 
-#### How It Was Fixed
-Every staff read and write operation checks the server-verified principal's role, permission bitmask, assigned ward bitmask, and department match against the C RBAC matrix before returning data or mutating SQLite rows.
-
-#### Step-by-Step Trace
-| Step | What Happens in the Code | Outcome |
-|---|---|---|
-| 1 | `WARD_OFFICER` sends `PATCH /api/staff/grievances/ABC-GRV-2026-101` (`backend/server.py:1508`). | Authenticated principal loaded |
-| 2 | Server loads target Ward 4 ticket and invokes `call_c_rbac(actor, 4, False, "UPDATE")` (`backend/server.py:1526`). | C engine rejects ward & department mismatch |
-| 3 | Handler logs `FORBIDDEN_RECORD_UPDATE` (`backend/server.py:1528`) and returns `403`. | **Handled Safely (`403 Forbidden`)** |
-
-#### Conclusion
-**Fix Verified** - Staff members cannot view or mutate grievances outside their assigned ward/department or approve certificates without explicit authority.
-
----
-
-### 3. Predictable Citizen Tracking ID Enumeration Blocked
-#### Summary
+### 3. Horizontal/Vertical Access Control & Citizen Tracking Isolation
 | Field | Value |
 |---|---|
-| Issue Type | Insecure Direct Record Enumeration & PII Disclosure |
-| Impact | High |
-| Affected File | `backend/server.py:900-944` |
-| Test Scenario | `POST /api/public/track` called with valid `ABC-GRV-2026-109` and valid `mobileLast4`, but an invalid tracking token `TK-wrongtokenvalue123` (`test_09_citizen_tracking_requires_high_entropy_token_and_last4`). |
+| Issue Type | Cross-Jurisdiction Access & Predictable Record Enumeration |
+| Affected File | `backend/app/policies/rbac.py`, `backend/server.py` |
+| Test Scenario | `test_04_rbac_idor_horizontal_and_vertical_escalation_blocked` and `test_full_civic_and_staff_lifecycle` |
+| Outcome | Ward 1 Water Officer receives `403` attempting to modify a Ward 4 Roads grievance, approve a certificate, export audit CSV, or delete records; verified citizen tracking requires valid `TK-*` token + `mobileLast4`. |
 
-#### How It Was Fixed
-Citizen receipts now issue a cryptographically random `TK-*` verification token stored hashed with HMAC-SHA256; lookup requires constant-time (`hmac.compare_digest`) matches on both the token hash and the 4-digit mobile suffix, and returns only masked citizen display names.
-
-#### Step-by-Step Trace
-| Step | What Happens in the Code | Outcome |
-|---|---|---|
-| 1 | Tracking query enters `POST /api/public/track` (`backend/server.py:900`). | Passes rate limit & schema check |
-| 2 | `hmac.compare_digest(row["tracking_token_hash"], hash_token(token))` evaluates false (`backend/server.py:915`). | Constant-time token mismatch |
-| 3 | Logs `TRACKING_VERIFICATION_FAILED` alert (`backend/server.py:931`) and returns `404`. | **Handled Safely (`404 Not Found`)** |
-
-#### Conclusion
-**Fix Verified** - Guessing sequential tracking IDs no longer exposes citizen personal details or remarks.
-
----
-
-### 4. Unexpected Shadow Fields, Script URIs & Oversized Payloads Rejected
-#### Summary
+### 4. SQLi Parameterization, Path Traversal & Oversized Payload Rejection
 | Field | Value |
 |---|---|
-| Issue Type | Mass Assignment / Unsafe URI / Unbounded Payload |
-| Impact | Medium |
-| Affected File | `backend/security_utils.py:148-208`, `backend/server.py:355-365` |
-| Test Scenario | `POST /api/public/grievances` sent with extra `{"isAdmin": true}`, `{"ward": 99}`, `{"beforePhotoUrl": "javascript:alert(1)"}`, and `Content-Length: 3145728` (`test_08_schema_allowlist_xss_url_and_size_caps`). |
+| Issue Type | Query Injection / Path Traversal / Unbounded Payload |
+| Affected File | `backend/security_utils.py`, `backend/server.py` |
+| Test Scenario | `test_05_sqli_path_traversal_ssrf_and_oversized_payload_guards` |
+| Outcome | SQLi string in `?q=` executes safely via parameterized queries (`0` matched rows), `../../etc/passwd` filename returns `400`, internal/non-HTTPS URLs fail `is_safe_external_https_url`, and `Content-Length: 3MB` returns `413`. |
 
-#### How It Was Fixed
-Payload decoders enforce a 2 MB `Content-Length` cap (`413`), strict key allowlists rejecting any unrecognized fields (`400`), range/enum validation, and strict `data:image/*` or allowlisted local asset URI matching.
-
-#### Step-by-Step Trace
-| Step | What Happens in the Code | Outcome |
-|---|---|---|
-| 1 | Extra `isAdmin` or `javascript:alert(1)` enters `validate_grievance_create` (`backend/security_utils.py:175`). | Strict schema validation invoked |
-| 2 | `ensure_allowed_keys` / `validate_photo_url` raises `ValueError` (`backend/security_utils.py:167, 160`). | Handler returns `400 Bad Request` |
-| 3 | `3 MB` `Content-Length` hits `_read_json()` guard (`backend/server.py:362`). | **Handled Safely (`413 Payload Too Large`)** |
-
-#### Conclusion
-**Fix Verified** - Extra privilege fields, unsafe URI schemes, out-of-range wards, and oversized payloads are rejected prior to database access.
-
----
-
-### 5. Brute-Force Account Lockout, Cross-Origin Rejection & Immutable Audit Triggers
-#### Summary
+### 5. Brute-Force Lockout, Immutable Audit & Backup Integrity Drill
 | Field | Value |
 |---|---|
-| Issue Type | Credential Brute-Force / Cross-Origin State Mutation / Audit Tampering |
-| Impact | High |
-| Affected File | `backend/server.py:325-330, 740-819`, `backend/db.py:156-189` |
-| Test Scenario | (a) 5 wrong logins followed by a 6th login with valid passcode (`test_10`); (b) `POST /api/public/track` with `Origin: https://evil.example` (`test_12`); (c) SQLite `UPDATE`/`DELETE` executed against `audit_logs` (`test_11`). |
-
-#### How It Was Fixed
-Failed logins increment per-account failure counters with exponential backoff and trigger a 15-minute `423 Locked` state + `CRITICAL` alert after 5 failures; mutating endpoints verify same-origin headers (`403`); SQLite enforces `BEFORE UPDATE` and `BEFORE DELETE` abort triggers on `audit_logs` and `security_alerts`.
-
-#### Step-by-Step Trace
-| Step | What Happens in the Code | Outcome |
-|---|---|---|
-| 1 | 5th failed login sets `locked_until = now + 900` (`backend/server.py:770`) and emits `ACCOUNT_LOCKED`. | 6th attempt returns `423 Locked` |
-| 2 | Cross-origin `POST` fails `_check_csrf_and_origin()` (`backend/server.py:327`). | Returns `403 Forbidden` |
-| 3 | Direct `UPDATE` or `DELETE` on `audit_logs` hits `trg_audit_no_update` / `trg_audit_no_delete` (`backend/db.py:156-166`). | **Handled Safely (`SQLite ABORT`)** |
-
-#### Conclusion
-**Fix Verified** - Repeated credential guessing locks accounts with security alerts, foreign origins cannot mutate state, and audit records cannot be altered or purged.
+| Issue Type | Credential Guessing / Audit Tampering / Backup Integrity |
+| Affected File | `backend/server.py`, `backend/db.py`, `backend/maintenance.py` |
+| Test Scenario | `test_07_bruteforce_lockout_and_rate_limit`, `test_08_audit_immutability_and_prod_maintenance_reset_block`, and `scripts/backup.sh` |
+| Outcome | 5 failed logins trigger 15-minute `423 Locked` + `Retry-After` + `CRITICAL` alert; SQLite `UPDATE`/`DELETE` on `audit_logs` and `security_alerts` raise `DatabaseError`; backup manifest + `restore-drill` passes `PRAGMA integrity_check` (`ok`). |
 
 ---
 
 ### Automated Verification Runs
-- `python3 -m unittest -v backend/tests/test_security_hardening.py` -> **13 tests passed (`OK`)**
-- `python3 backend/maintenance.py backup` & `restore-drill` -> **`"ok": true, "integrity": "ok"`**
+- `python3 backend/c_engine/build.py --force` -> **Exited 0 (`compiled_now=True, compiler=gcc`)**
+- `python3 -m unittest discover -s backend/tests -p "test_*.py" -v` -> **30 tests passed (`OK`)**
+- `bash scripts/backup.sh` & `bash scripts/restore.sh` -> **`"ok": true, "integrity": "ok"`**
 - `python3 backend/maintenance.py retention-check --days 365` -> **`"immutableTriggersActive": true`**
-- `npx eslint firestore.rules` -> **Exited 0 (0 errors, 0 warnings)**
-- `npm run build` & `tsc --noEmit` -> **Compiled and linted cleanly**
+- `npx eslint firestore.rules` -> **Exited 0 (0 errors, 0 warnings)** & Firestore rules deployed via `DeployRules`
+- `npm run lint` (`tsc --noEmit`) & `npm run build` (`vite build`) -> **Compiled and linted cleanly**
+- Live `GET http://127.0.0.1:3000` (`/api/health`, `/api/ready`, `/api/v1/docs`, `/api/auth/status`, `/api/public/overview`, `/`) -> **All returned `200 OK` with CSP headers and exact DB counts**

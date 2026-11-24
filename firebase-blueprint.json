@@ -57,7 +57,18 @@
         },
         "status": {
           "type": "string",
-          "enum": ["Pending", "In Progress", "Field Inspection", "Resolved", "Rejected"],
+          "enum": [
+            "SUBMITTED",
+            "ACKNOWLEDGED",
+            "ASSIGNED",
+            "IN_PROGRESS",
+            "ON_HOLD",
+            "ESCALATED",
+            "RESOLVED",
+            "CLOSED",
+            "REJECTED",
+            "REOPENED"
+          ],
           "maxLength": 40
         },
         "createdAt": {
@@ -124,7 +135,18 @@
         },
         "status": {
           "type": "string",
-          "enum": ["Pending", "In Progress", "Field Inspection", "Resolved", "Rejected"],
+          "enum": [
+            "SUBMITTED",
+            "ACKNOWLEDGED",
+            "ASSIGNED",
+            "IN_PROGRESS",
+            "ON_HOLD",
+            "ESCALATED",
+            "RESOLVED",
+            "CLOSED",
+            "REJECTED",
+            "REOPENED"
+          ],
           "maxLength": 40
         },
         "assignedOfficerId": {

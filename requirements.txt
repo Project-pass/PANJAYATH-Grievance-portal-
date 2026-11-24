@@ -1,0 +1,12 @@
+# Production runtime uses Python 3.11+ standard library for the local SQLite engine
+# and adds SQLAlchemy/Alembic/PostgreSQL drivers for multi-user PostgreSQL deployments.
+SQLAlchemy>=2.0.35,<3.0.0
+alembic>=1.13.3,<2.0.0
+psycopg[binary]>=3.2.3,<4.0.0
+python-dotenv>=1.0.1,<2.0.0
+
+# Dev / QA / Security tooling
+pytest>=8.3.0,<9.0.0
+ruff>=0.7.0,<1.0.0
+mypy>=1.13.0,<2.0.0
+pip-audit>=2.7.3,<3.0.0
