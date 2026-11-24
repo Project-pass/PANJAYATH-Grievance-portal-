@@ -17,13 +17,17 @@ import {
   renderStatusLabel,
 } from './icons.js';
 import {
+  bootstrapClaimSecretary,
   canViewGrievance,
   canViewService,
+  connectFirebaseGoogle,
   deleteRecord,
+  disconnectFirebaseGoogle,
   getActivePermissions,
   getCurrentUser,
   loginWithCredentials,
   logoutStaff,
+  maintenanceReset,
   notify,
   saveStaff,
   store,
@@ -44,9 +48,7 @@ const PERM_LIST = [
 ];
 
 function renderLoginScreen() {
-  const demo = (store.portalState.staff || []).filter((s) =>
-    ['stf-secretary', 'stf-rahul', 'stf-anitha', 'stf-deepak'].includes(s.id)
-  );
+  const bootstrap = store.bootstrapRequired;
 
   return `
     <div class="min-h-[calc(100vh-44px)] bg-[#F8FAFC] flex items-center justify-center px-4 py-10">
@@ -57,17 +59,17 @@ function renderLoginScreen() {
             <span class="font-display text-lg font-bold">ABC Gram Panchayat</span>
           </div>
           <h1 class="mt-6 font-display text-2xl font-bold text-slate-900">Official Staff & Admin Sign In</h1>
-          <p class="mt-1.5 text-sm text-slate-600">Authorized access for Panchayat Secretary, Ward Officers, and CSC Front-Desk Operators.</p>
+          <p class="mt-1.5 text-sm text-slate-600">Authenticated session access for Panchayat Secretary, Ward Officers, and CSC Front-Desk Operators.</p>
           <div id="admin-login-error" class="hidden mt-4 p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800"></div>
 
           <form id="admin-login-form" class="mt-6 space-y-4">
             <div>
-              <label for="admin-email" class="block text-sm font-medium text-slate-700 mb-1.5">Official Government Email</label>
-              <input id="admin-email" name="email" type="email" required placeholder="officer@abcpanchayat.gov.in" class="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1E3A8A]" />
+              <label for="admin-identifier" class="block text-sm font-medium text-slate-700 mb-1.5">User ID / Official Email</label>
+              <input id="admin-identifier" name="identifier" type="text" required autocomplete="username" placeholder="admin_test or secretary@abcpanchayat.gov.in" class="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1E3A8A]" />
             </div>
             <div>
-              <label for="admin-pin" class="block text-sm font-medium text-slate-700 mb-1.5">4-Digit Staff Access PIN</label>
-              <input id="admin-pin" name="pin" type="password" maxlength="8" required placeholder="••••" class="w-full px-3.5 py-2.5 text-sm font-mono border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1E3A8A]" />
+              <label for="admin-passcode" class="block text-sm font-medium text-slate-700 mb-1.5">Password / Access Passcode</label>
+              <input id="admin-passcode" name="passcode" type="password" maxlength="128" required autocomplete="current-password" placeholder="••••••••" class="w-full px-3.5 py-2.5 text-sm font-mono border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1E3A8A]" />
             </div>
             <button type="submit" class="w-full inline-flex items-center justify-center gap-2 px-5 py-2.5 text-sm font-semibold text-white bg-[#1E3A8A] hover:bg-[#172E6E] rounded-lg transition-colors cursor-pointer">
               ${ICONS.shield('w-4 h-4')}
@@ -76,44 +78,58 @@ function renderLoginScreen() {
           </form>
 
           <div class="mt-6 pt-5 border-t border-slate-200 flex items-center justify-between text-xs text-slate-500">
-            <span>Protected by C + Python RBAC Engine</span>
+            <span>Protected by C + Python RBAC & Opaque Sessions</span>
             <button type="button" data-portal-switch="citizen" class="text-[#1E3A8A] font-semibold hover:underline cursor-pointer">Return to Citizen Portal</button>
           </div>
         </div>
 
         <div class="lg:col-span-6 bg-[#F8FAFC] border-t lg:border-t-0 lg:border-l border-slate-200 p-6 sm:p-8 lg:p-10 flex flex-col justify-between">
-          <div>
-            <p class="text-xs font-semibold text-[#059669]">Quick Demo-Credential Autofill</p>
-            <h2 class="mt-2 font-display text-lg font-bold text-slate-900">Test RBAC Roles Instantly</h2>
-            <p class="mt-1 text-xs text-slate-600 leading-relaxed">Autofill credentials or sign in directly to verify ward jurisdiction filtering, certificate approval guards, and access control.</p>
-
-            <div class="mt-5 space-y-2.5">
-              ${demo
-                .map(
-                  (acc) => `
-                  <div class="bg-white border border-slate-200 rounded-lg p-3.5 flex items-center justify-between gap-3">
-                    <div class="min-w-0">
-                      <div class="flex items-center gap-2">
-                        <p class="text-sm font-semibold text-slate-900 truncate">${esc(acc.name)}</p>
-                        <span class="text-[11px] font-mono text-slate-500">PIN: ${esc(acc.pin)}</span>
-                      </div>
-                      <p class="text-xs text-slate-600 truncate">${esc(acc.designation)} · ${
-                    acc.assignedWards.length === 15
-                      ? 'All Wards'
-                      : `Wards ${acc.assignedWards[0]}–${acc.assignedWards[acc.assignedWards.length - 1]}`
-                  }</p>
-                      <p class="text-[11px] font-mono text-slate-500 truncate mt-0.5">${esc(acc.email)}</p>
+          ${
+            bootstrap
+              ? `<div>
+                  <span class="inline-block px-2.5 py-1 text-[11px] font-semibold bg-emerald-100 text-emerald-900 rounded-md">First-Run Setup Available</span>
+                  <h2 class="mt-3 font-display text-lg font-bold text-slate-900">Claim Panchayat Secretary Account</h2>
+                  <p class="mt-1.5 text-xs text-slate-600 leading-relaxed">
+                    No Secretary password is configured yet. Set a strong one-time initial password (8+ characters combining letters, digits, or symbols) for User ID <span class="font-mono font-semibold text-slate-900">admin_test</span> (<span class="font-mono text-slate-800">secretary@abcpanchayat.gov.in</span>). Once claimed, this setup locks permanently.
+                  </p>
+                  <div id="bootstrap-claim-error" class="hidden mt-3 p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-800"></div>
+                  <form id="bootstrap-claim-form" class="mt-4 space-y-3">
+                    <div>
+                      <label for="claim-passcode" class="block text-xs font-semibold text-slate-700 mb-1">Choose Secretary Password *</label>
+                      <input id="claim-passcode" name="passcode" type="password" minlength="8" maxlength="128" required placeholder="8+ chars (e.g., letters + digits or _)" class="w-full px-3 py-2 text-sm font-mono bg-white border border-slate-300 rounded-lg" />
                     </div>
-                    <div class="flex items-center gap-1.5 shrink-0">
-                      <button type="button" data-autofill-email="${esc(acc.email)}" data-autofill-pin="${esc(acc.pin)}" class="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md whitespace-nowrap cursor-pointer">Autofill</button>
-                      <button type="button" data-instant-login-email="${esc(acc.email)}" data-instant-login-pin="${esc(acc.pin)}" class="px-2.5 py-1.5 text-xs font-semibold text-white bg-[#059669] hover:bg-[#047857] rounded-md whitespace-nowrap cursor-pointer">Sign In</button>
+                    <div>
+                      <label for="claim-passcode-confirm" class="block text-xs font-semibold text-slate-700 mb-1">Confirm Password *</label>
+                      <input id="claim-passcode-confirm" name="confirmPasscode" type="password" minlength="8" maxlength="128" required placeholder="Re-enter password" class="w-full px-3 py-2 text-sm font-mono bg-white border border-slate-300 rounded-lg" />
                     </div>
-                  </div>`
-                )
-                .join('')}
-            </div>
-          </div>
-          <p class="mt-6 text-[11px] text-slate-500">Suspended accounts are blocked from signing in by the RBAC engine.</p>
+                    <button type="submit" class="w-full px-4 py-2.5 text-sm font-semibold text-white bg-[#059669] hover:bg-[#047857] rounded-lg cursor-pointer">
+                      Claim Secretary Role & Sign In
+                    </button>
+                  </form>
+                </div>`
+              : `<div>
+                  <p class="text-xs font-semibold text-[#1E3A8A]">Credential & Session Policy</p>
+                  <h2 class="mt-2 font-display text-lg font-bold text-slate-900">Role-Based Access Control</h2>
+                  <ul class="mt-3 space-y-2 text-xs text-slate-600 list-disc pl-4 leading-relaxed">
+                    <li>All staff passcodes are hashed server-side using salted scrypt.</li>
+                    <li>Sessions use server-issued opaque tokens with 30-minute idle timeout.</li>
+                    <li>Repeated failed attempts trigger progressive delays and a 15-minute lockout.</li>
+                    <li>Ward Officers and CSC Operators receive credentials from the Panchayat Secretary via Access & Roles.</li>
+                  </ul>
+                  <div class="mt-5 pt-4 border-t border-slate-200">
+                    <p class="text-xs font-semibold text-slate-700 mb-2">Cloud Firestore Identity (Optional)</p>
+                    ${
+                      store.firebaseUser
+                        ? `<div class="flex items-center justify-between gap-2 bg-white border border-slate-200 rounded-lg p-3 text-xs">
+                             <span class="truncate text-slate-700">${esc(store.firebaseUser.email || 'Google Connected')}</span>
+                             <button type="button" id="btn-fb-signout" class="text-red-700 font-semibold hover:underline cursor-pointer">Disconnect</button>
+                           </div>`
+                        : `<button type="button" id="btn-fb-signin" class="w-full px-4 py-2 text-xs font-semibold text-slate-800 bg-white hover:bg-slate-100 border border-slate-300 rounded-lg cursor-pointer">Connect Google Cloud Identity</button>`
+                    }
+                  </div>
+                </div>`
+          }
+          <p class="mt-6 text-[11px] text-slate-500">Suspended accounts and unauthorized cross-ward actions are audited and blocked.</p>
         </div>
       </div>
     </div>
@@ -121,7 +137,7 @@ function renderLoginScreen() {
 }
 
 function renderOverview(user, visibleGrievances, visibleServices) {
-  const slaLimit = store.portalState.slaLimitDays || 7;
+  const slaLimit = store.staffDashboard.slaLimitDays || 7;
   const open = visibleGrievances.filter((g) => g.status !== 'Resolved' && g.status !== 'Rejected');
   const breached = open.filter((g) => getSlaInfo(g, slaLimit).isBreached);
   const resolved = visibleGrievances.filter((g) => g.status === 'Resolved').length;
@@ -157,7 +173,7 @@ function renderOverview(user, visibleGrievances, visibleServices) {
         <div class="bg-white border border-slate-200 rounded-xl p-5">
           <p class="text-xs font-medium text-slate-500">Total Open Grievances</p>
           <p class="mt-2 text-3xl font-bold font-mono tabular-nums text-[#1E3A8A]">${open.length}</p>
-          <p class="mt-1 text-xs text-slate-500">Out of ${visibleGrievances.length} assigned tickets</p>
+          <p class="mt-1 text-xs text-slate-500">Out of ${visibleGrievances.length} authorized tickets</p>
         </div>
         <div class="bg-white border border-slate-200 rounded-xl p-5">
           <p class="text-xs font-medium text-slate-500">Pending Service Approvals</p>
@@ -239,14 +255,14 @@ function renderOverview(user, visibleGrievances, visibleServices) {
 
 function renderGrievancesDesk(user, visibleGrievances) {
   const f = store.adminFilters;
-  const slaLimit = store.portalState.slaLimitDays || 7;
+  const slaLimit = store.staffDashboard.slaLimitDays || 7;
   const filtered = visibleGrievances.filter((g) => {
     if (f.status !== 'ALL' && g.status !== f.status) return false;
     if (f.ward !== 'ALL' && g.ward !== Number(f.ward)) return false;
     if (f.category !== 'ALL' && g.category !== f.category) return false;
     if (f.slaOverdueOnly && !getSlaInfo(g, slaLimit).isBreached) return false;
     if (f.search.trim()) {
-      const hay = `${g.id} ${g.citizenName} ${g.landmark} ${g.description} ${g.mobile}`.toLowerCase();
+      const hay = `${g.id} ${g.citizenName} ${g.landmark} ${g.description}`.toLowerCase();
       if (!hay.includes(f.search.trim().toLowerCase())) return false;
     }
     return true;
@@ -443,11 +459,11 @@ function renderAccessControl(user, perms) {
       <div class="bg-white border border-slate-200 rounded-xl p-10 text-center max-w-xl mx-auto mt-8">
         <div class="text-red-600 flex justify-center mb-3">${ICONS.shield('w-10 h-10')}</div>
         <h2 class="font-display text-xl font-bold text-slate-900">Access Control Restricted</h2>
-        <p class="mt-2 text-sm text-slate-600">Your current role (${esc(user.designation)}) does not have <code class="font-mono text-xs bg-slate-100 px-1.5 py-0.5 rounded">canManageUsers</code> permission. Switch to Panchayat Secretary (Super Admin) to manage staff roles.</p>
+        <p class="mt-2 text-sm text-slate-600">Your current role (${esc(user.designation)}) does not have <code class="font-mono text-xs bg-slate-100 px-1.5 py-0.5 rounded">canManageUsers</code> permission.</p>
       </div>`;
   }
 
-  const staffList = store.portalState.staff || [];
+  const staffList = store.staffDashboard.staff || [];
   return `
     <div class="space-y-8">
       <div class="flex flex-wrap items-center justify-between gap-4">
@@ -463,7 +479,7 @@ function renderAccessControl(user, perms) {
       <div class="bg-white border border-slate-200 rounded-xl overflow-hidden">
         <div class="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
           <h2 class="font-display text-base font-bold text-slate-900">Staff Directory (${staffList.length})</h2>
-          <span class="text-xs text-slate-500">Persisted via Python + C RBAC engine</span>
+          <span class="text-xs text-slate-500">Salted scrypt credentials · C RBAC Enforced</span>
         </div>
         <div class="overflow-x-auto">
           <table class="w-full text-left border-collapse text-sm">
@@ -483,7 +499,7 @@ function renderAccessControl(user, perms) {
                   (s) => `
                 <tr class="hover:bg-slate-50/70">
                   <td class="py-3.5 px-4">
-                    <p class="font-semibold text-slate-900">${esc(s.name)}</p>
+                    <p class="font-semibold text-slate-900">${esc(s.name)} ${s.username ? `<span class="ml-1 text-[11px] font-mono text-[#1E3A8A] bg-indigo-50 px-1.5 py-0.5 rounded">${esc(s.username)}</span>` : ''}</p>
                     <p class="text-xs font-mono text-slate-500">${esc(s.email)}</p>
                   </td>
                   <td class="py-3.5 px-4">
@@ -492,7 +508,7 @@ function renderAccessControl(user, perms) {
                   </td>
                   <td class="py-3.5 px-4 text-slate-700">${esc(s.department)}</td>
                   <td class="py-3.5 px-4 font-mono text-xs tabular-nums text-slate-700">${
-                    s.assignedWards.length === 15 ? 'All Wards (1–15)' : `Wards ${s.assignedWards.join(', ')}`
+                    (s.assignedWards || []).length === 15 ? 'All Wards (1–15)' : `Wards ${(s.assignedWards || []).join(', ')}`
                   }</td>
                   <td class="py-3.5 px-4">
                     <button type="button" data-toggle-staff="${esc(s.id)}" class="px-2.5 py-1 text-xs font-medium rounded-md border cursor-pointer ${
@@ -502,7 +518,7 @@ function renderAccessControl(user, perms) {
                   }">${s.isActive ? 'Active' : 'Suspended'}</button>
                   </td>
                   <td class="py-3.5 px-4 text-right">
-                    <button type="button" data-edit-staff="${esc(s.id)}" class="px-3 py-1.5 text-xs font-semibold text-[#1E3A8A] bg-indigo-50 hover:bg-indigo-100 rounded-md cursor-pointer">Edit Role</button>
+                    <button type="button" data-edit-staff="${esc(s.id)}" class="px-3 py-1.5 text-xs font-semibold text-[#1E3A8A] bg-indigo-50 hover:bg-indigo-100 rounded-md cursor-pointer">Edit Role / Passcode</button>
                   </td>
                 </tr>`
                 )
@@ -531,7 +547,7 @@ function renderAccessControl(user, perms) {
                 <tr class="${!s.isActive ? 'opacity-50' : ''}">
                   <td class="py-3 px-4"><span class="font-semibold text-slate-900">${esc(s.name)}</span> · <span class="font-mono text-slate-500">${esc(s.role)}</span></td>
                   ${PERM_LIST.map((p) =>
-                    s.permissions[p.key]
+                    s.permissions?.[p.key]
                       ? `<td class="py-3 px-4 text-center"><span class="inline-flex items-center justify-center w-6 h-6 rounded bg-emerald-50 text-[#059669] border border-emerald-200">${ICONS.check('w-3.5 h-3.5')}</span></td>`
                       : `<td class="py-3 px-4 text-center"><span class="inline-flex items-center justify-center w-6 h-6 rounded bg-slate-50 text-slate-400 border border-slate-200">${ICONS.lock('w-3 h-3')}</span></td>`
                   ).join('')}
@@ -542,55 +558,120 @@ function renderAccessControl(user, perms) {
           </table>
         </div>
       </div>
+
+      <div class="bg-white border border-red-200 rounded-xl p-6">
+        <h2 class="font-display text-base font-bold text-red-900">Authorized Non-Production Maintenance Reset</h2>
+        <p class="text-xs text-slate-600 mt-1">Re-initializes non-production seed records under Panchayat Secretary authorization and records an immutable audit event.</p>
+        <div id="maint-reset-msg" class="hidden mt-3 p-2.5 rounded-lg text-xs"></div>
+        <form id="maintenance-reset-form" class="mt-4 flex flex-wrap items-end gap-3">
+          <div>
+            <label class="block text-xs font-medium text-slate-700 mb-1">Confirmation Phrase (<code class="font-mono">CONFIRM_PORTAL_RESET</code>)</label>
+            <input name="confirmPhrase" type="text" required placeholder="CONFIRM_PORTAL_RESET" class="px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg" />
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-slate-700 mb-1">Maintenance Key (if configured)</label>
+            <input name="maintenanceKey" type="password" placeholder="Optional env key" class="px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg" />
+          </div>
+          <button type="submit" class="px-4 py-2 text-xs font-semibold text-white bg-red-700 hover:bg-red-800 rounded-lg cursor-pointer">Execute Authorized Reset</button>
+        </form>
+      </div>
     </div>
   `;
 }
 
-function renderAuditLog() {
+function renderAuditLog(user) {
   const q = (store.adminFilters.auditSearch || '').trim().toLowerCase();
-  const logs = (store.portalState.auditLogs || []).filter((l) =>
+  const logs = (store.staffDashboard.auditLogs || []).filter((l) =>
     !q ? true : `${l.actorName} ${l.action} ${l.targetId} ${l.details}`.toLowerCase().includes(q)
   );
+  const alerts = store.staffDashboard.securityAlerts || [];
 
   return `
-    <div class="space-y-6">
-      <div class="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 class="font-display text-2xl font-bold text-slate-900">System Audit Log</h1>
-          <p class="text-sm text-slate-600 mt-0.5">Immutable chronological record of all administrative and RBAC events.</p>
+    <div class="space-y-8">
+      ${
+        user.role === 'SUPER_ADMIN'
+          ? `<div class="bg-white border border-slate-200 rounded-xl overflow-hidden">
+              <div class="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+                <div>
+                  <h2 class="font-display text-base font-bold text-slate-900">Security Event Monitor (${alerts.length})</h2>
+                  <p class="text-xs text-slate-500 mt-0.5">Append-only monitoring for lockouts, rate limits, and unauthorized access attempts.</p>
+                </div>
+              </div>
+              ${
+                alerts.length === 0
+                  ? `<p class="p-6 text-xs text-slate-500">No security alerts recorded.</p>`
+                  : `<div class="overflow-x-auto">
+                      <table class="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr class="bg-[#F8FAFC] border-b border-slate-200 text-slate-600 font-semibold">
+                            <th class="py-2.5 px-4">Timestamp</th>
+                            <th class="py-2.5 px-4">Severity</th>
+                            <th class="py-2.5 px-4">Event</th>
+                            <th class="py-2.5 px-4">Target / Actor</th>
+                            <th class="py-2.5 px-4">Details</th>
+                          </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-200">
+                          ${alerts
+                            .slice(0, 20)
+                            .map(
+                              (al) => `
+                            <tr>
+                              <td class="py-2.5 px-4 font-mono tabular-nums text-slate-500 whitespace-nowrap">${esc(formatDateTime(al.timestamp))}</td>
+                              <td class="py-2.5 px-4 font-mono font-bold ${al.severity === 'CRITICAL' || al.severity === 'HIGH' ? 'text-red-700' : 'text-amber-700'}">${esc(al.severity)}</td>
+                              <td class="py-2.5 px-4 font-mono text-slate-800 whitespace-nowrap">${esc(al.eventType)}</td>
+                              <td class="py-2.5 px-4 font-mono text-slate-600 whitespace-nowrap">${esc(al.actorHint)}</td>
+                              <td class="py-2.5 px-4 text-slate-700">${esc(al.details)}</td>
+                            </tr>`
+                            )
+                            .join('')}
+                        </tbody>
+                      </table>
+                    </div>`
+              }
+            </div>`
+          : ''
+      }
+
+      <div class="space-y-4">
+        <div class="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <h1 class="font-display text-2xl font-bold text-slate-900">Immutable System Audit Log</h1>
+            <p class="text-sm text-slate-600 mt-0.5">Append-only database triggers prevent modification or deletion of audit history.</p>
+          </div>
+          <div class="relative w-full sm:w-72">
+            <span class="text-slate-400 absolute left-3 top-1/2 -translate-y-1/2">${ICONS.search('w-4 h-4')}</span>
+            <input id="audit-search-input" type="text" value="${esc(store.adminFilters.auditSearch)}" placeholder="Filter audit log..." class="w-full pl-9 pr-3 py-2 text-sm bg-white border border-slate-300 rounded-lg" />
+          </div>
         </div>
-        <div class="relative w-full sm:w-72">
-          <span class="text-slate-400 absolute left-3 top-1/2 -translate-y-1/2">${ICONS.search('w-4 h-4')}</span>
-          <input id="audit-search-input" type="text" value="${esc(store.adminFilters.auditSearch)}" placeholder="Filter audit log..." class="w-full pl-9 pr-3 py-2 text-sm bg-white border border-slate-300 rounded-lg" />
-        </div>
-      </div>
-      <div class="bg-white border border-slate-200 rounded-xl overflow-hidden">
-        <div class="overflow-x-auto">
-          <table class="w-full text-left border-collapse text-sm">
-            <thead>
-              <tr class="bg-[#F8FAFC] border-b border-slate-200 text-xs font-semibold text-slate-600">
-                <th class="py-3 px-4">Timestamp</th>
-                <th class="py-3 px-4">Actor & Role</th>
-                <th class="py-3 px-4">Action</th>
-                <th class="py-3 px-4">Target</th>
-                <th class="py-3 px-4">Event Details</th>
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-slate-200">
-              ${logs
-                .map(
-                  (l) => `
-                <tr class="hover:bg-slate-50/70">
-                  <td class="py-3 px-4 font-mono text-xs tabular-nums text-slate-500 whitespace-nowrap">${esc(formatDateTime(l.timestamp))}</td>
-                  <td class="py-3 px-4 whitespace-nowrap"><span class="font-medium text-slate-900">${esc(l.actorName)}</span> · <span class="font-mono text-xs text-slate-500">${esc(l.actorRole)}</span></td>
-                  <td class="py-3 px-4 font-mono text-xs font-semibold text-[#1E3A8A] whitespace-nowrap">${esc(l.action)}</td>
-                  <td class="py-3 px-4 font-mono text-xs text-slate-700 whitespace-nowrap">${esc(l.targetId)}</td>
-                  <td class="py-3 px-4 text-xs text-slate-700">${esc(l.details)}</td>
-                </tr>`
-                )
-                .join('')}
-            </tbody>
-          </table>
+        <div class="bg-white border border-slate-200 rounded-xl overflow-hidden">
+          <div class="overflow-x-auto">
+            <table class="w-full text-left border-collapse text-sm">
+              <thead>
+                <tr class="bg-[#F8FAFC] border-b border-slate-200 text-xs font-semibold text-slate-600">
+                  <th class="py-3 px-4">Timestamp</th>
+                  <th class="py-3 px-4">Actor & Session</th>
+                  <th class="py-3 px-4">Action</th>
+                  <th class="py-3 px-4">Target</th>
+                  <th class="py-3 px-4">Event Details</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-slate-200">
+                ${logs
+                  .map(
+                    (l) => `
+                  <tr class="hover:bg-slate-50/70">
+                    <td class="py-3 px-4 font-mono text-xs tabular-nums text-slate-500 whitespace-nowrap">${esc(formatDateTime(l.timestamp))}</td>
+                    <td class="py-3 px-4 whitespace-nowrap"><span class="font-medium text-slate-900">${esc(l.actorName)}</span> · <span class="font-mono text-xs text-slate-500">${esc(l.actorRole)} (${esc(l.sessionPrefix || 'sys')})</span></td>
+                    <td class="py-3 px-4 font-mono text-xs font-semibold text-[#1E3A8A] whitespace-nowrap">${esc(l.action)}</td>
+                    <td class="py-3 px-4 font-mono text-xs text-slate-700 whitespace-nowrap">${esc(l.targetId)}</td>
+                    <td class="py-3 px-4 text-xs text-slate-700">${esc(l.details)}</td>
+                  </tr>`
+                  )
+                  .join('')}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
     </div>
@@ -599,17 +680,17 @@ function renderAuditLog() {
 
 function renderDetailDrawer(user, perms) {
   const grv = store.selectedGrievanceId
-    ? (store.portalState.grievances || []).find((g) => g.id === store.selectedGrievanceId)
+    ? (store.staffDashboard.grievances || []).find((g) => g.id === store.selectedGrievanceId)
     : null;
   const srv = store.selectedServiceId
-    ? (store.portalState.services || []).find((s) => s.id === store.selectedServiceId)
+    ? (store.staffDashboard.services || []).find((s) => s.id === store.selectedServiceId)
     : null;
   const record = grv || srv;
   if (!record) return '';
 
   const isGrv = Boolean(grv);
   const canAssign = perms.canAssignTickets || user.role === 'SUPER_ADMIN';
-  const activeOfficers = (store.portalState.staff || []).filter((s) => s.isActive);
+  const activeOfficers = (store.staffDashboard.staff || []).filter((s) => s.isActive);
 
   return `
     <div class="fixed inset-0 z-50 bg-slate-950/50 flex justify-end" role="dialog" aria-modal="true">
@@ -631,13 +712,13 @@ function renderDetailDrawer(user, perms) {
         <div class="p-6 space-y-6 flex-1">
           <div class="flex flex-wrap items-center justify-between gap-3">
             ${renderStatusLabel(record.status)}
-            ${renderSlaBadge(record, store.portalState.slaLimitDays)}
+            ${renderSlaBadge(record, store.staffDashboard.slaLimitDays)}
           </div>
           <div id="drawer-msg-box" class="hidden p-3 rounded-lg text-sm"></div>
 
           <dl class="grid grid-cols-1 sm:grid-cols-2 gap-4 bg-[#F8FAFC] border border-slate-200 rounded-lg p-4 text-sm">
             <div><dt class="text-xs text-slate-500">${isGrv ? 'Citizen Name' : 'Applicant Name'}</dt><dd class="font-semibold text-slate-900 mt-0.5">${esc(isGrv ? record.citizenName : record.applicantName)}</dd></div>
-            <div><dt class="text-xs text-slate-500">Mobile Number</dt><dd class="font-mono tabular-nums text-slate-900 mt-0.5">${esc(record.mobile)}</dd></div>
+            <div><dt class="text-xs text-slate-500">Contact Number</dt><dd class="font-mono tabular-nums text-slate-900 mt-0.5">${esc(record.mobile)}</dd></div>
             <div><dt class="text-xs text-slate-500">Filed On</dt><dd class="font-mono tabular-nums text-slate-700 mt-0.5">${esc(formatDateTime(record.createdAt))}</dd></div>
             <div><dt class="text-xs text-slate-500">Current Assignee</dt><dd class="font-medium text-slate-900 mt-0.5">${esc(record.assignedOfficerName || 'Unassigned')}</dd></div>
             <div class="sm:col-span-2"><dt class="text-xs text-slate-500">${isGrv ? 'Description' : 'Address & Verified Docs'}</dt><dd class="text-slate-800 mt-0.5">${esc(isGrv ? record.description : `${record.address} · ${(record.checkedDocs || []).join(', ')}`)}</dd></div>
@@ -678,11 +759,11 @@ function renderDetailDrawer(user, perms) {
                   </div>
                   <div>
                     <label class="block text-xs font-semibold text-slate-700 mb-1.5">Official Public Remark</label>
-                    <textarea name="publicRemark" rows="2" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg">${esc(record.publicRemark || '')}</textarea>
+                    <textarea name="publicRemark" rows="2" maxlength="1000" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg">${esc(record.publicRemark || '')}</textarea>
                   </div>
                   <div>
-                    <label class="block text-xs font-semibold text-slate-700 mb-1.5">Internal Staff Note</label>
-                    <input name="internalRemark" type="text" value="${esc(record.internalRemark || '')}" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg" />
+                    <label class="block text-xs font-semibold text-slate-700 mb-1.5">Internal Staff Note (Staff Only)</label>
+                    <input name="internalRemark" type="text" maxlength="1000" value="${esc(record.internalRemark || '')}" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg" />
                   </div>
                   <div>
                     <p class="text-xs font-semibold text-slate-700 mb-1.5">Resolution Proof Image</p>
@@ -722,11 +803,6 @@ function renderDetailDrawer(user, perms) {
                           })
                           .join('')}
                       </select>
-                      ${
-                        !perms.canApproveCertificates
-                          ? `<p class="mt-1 text-[11px] text-amber-700">Final Certificate Approval guarded by C RBAC engine.</p>`
-                          : ''
-                      }
                     </div>
                     <div>
                       <label class="block text-xs font-semibold text-slate-700 mb-1.5">Assigned Officer</label>
@@ -743,7 +819,7 @@ function renderDetailDrawer(user, perms) {
                   </div>
                   <div>
                     <label class="block text-xs font-semibold text-slate-700 mb-1.5">Official Verification / Approval Remark</label>
-                    <textarea name="officialRemark" rows="3" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg">${esc(record.officialRemark || '')}</textarea>
+                    <textarea name="officialRemark" rows="3" maxlength="1000" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg">${esc(record.officialRemark || '')}</textarea>
                   </div>
                   <div class="pt-4 border-t border-slate-200 flex items-center justify-between gap-3">
                     ${
@@ -751,18 +827,18 @@ function renderDetailDrawer(user, perms) {
                         ? `<button type="button" id="btn-delete-record" data-del-kind="service" data-del-id="${esc(record.id)}" class="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg cursor-pointer">${ICONS.trash('w-3.5 h-3.5')}<span>Delete Application</span></button>`
                         : `<span class="text-xs text-slate-400">Delete restricted to Super Admin</span>`
                     }
-                    <button type="submit" class="px-5 py-2 text-sm font-semibold text-white bg-[#059669] hover:bg-[#047857] rounded-lg cursor-pointer">Save Application Update</button>
+                    <button type="submit" class="px-5 py-2 text-sm font-semibold text-white bg-[#059669] hover:bg-[#047857] rounded-lg cursor-pointer">Save Application Stage</button>
                   </div>
                 </form>`
           }
 
-          <div class="pt-5 border-t border-slate-200">
-            <h3 class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Action History (${(record.timeline || []).length})</h3>
+          <div class="pt-4 border-t border-slate-200">
+            <h3 class="text-xs font-semibold text-slate-600 mb-3">Action Audit Timeline</h3>
             <div class="space-y-3">
               ${(record.timeline || [])
                 .map(
                   (ev) => `
-                <div class="text-xs border border-slate-200 rounded-lg p-3 bg-[#F8FAFC]">
+                <div class="p-3 rounded-lg bg-[#F8FAFC] border border-slate-200 text-xs">
                   <div class="flex items-center justify-between gap-2">
                     <span class="font-semibold text-slate-900">${esc(ev.stepTitle)}</span>
                     <span class="font-mono tabular-nums text-slate-500">${esc(formatDateTime(ev.timestamp))}</span>
@@ -783,7 +859,7 @@ function renderDetailDrawer(user, perms) {
 function renderStaffModal() {
   if (!store.staffModalOpen) return '';
   const editing = store.editingStaffId
-    ? (store.portalState.staff || []).find((s) => s.id === store.editingStaffId)
+    ? (store.staffDashboard.staff || []).find((s) => s.id === store.editingStaffId)
     : null;
   const perms = editing ? editing.permissions : DEFAULT_ROLE_PERMISSIONS.WARD_OFFICER;
   const wards = store.staffModalWards;
@@ -802,9 +878,10 @@ function renderStaffModal() {
           <div id="staff-modal-error" class="hidden p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800"></div>
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div><label class="block text-xs font-semibold text-slate-700 mb-1">Full Name *</label><input name="name" type="text" required value="${esc(editing?.name || '')}" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg" /></div>
+            <div><label class="block text-xs font-semibold text-slate-700 mb-1">User ID (Username)</label><input name="username" type="text" minlength="3" maxlength="48" placeholder="e.g. ward_officer_1" value="${esc(editing?.username || '')}" class="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg" /></div>
             <div><label class="block text-xs font-semibold text-slate-700 mb-1">Official Email *</label><input name="email" type="email" required value="${esc(editing?.email || '')}" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg" /></div>
             <div><label class="block text-xs font-semibold text-slate-700 mb-1">Designation *</label><input name="designation" type="text" required value="${esc(editing?.designation || 'Ward Field Officer')}" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg" /></div>
-            <div><label class="block text-xs font-semibold text-slate-700 mb-1">Access PIN</label><input name="pin" type="text" maxlength="8" value="${esc(editing?.pin || '6006')}" class="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg" /></div>
+            <div class="sm:col-span-2"><label class="block text-xs font-semibold text-slate-700 mb-1">${editing ? 'New Password / Passcode (leave blank to keep)' : 'Initial Password / Passcode (8+ chars) *'}</label><input name="passcode" type="password" ${editing ? '' : 'required minlength="8"'} maxlength="128" placeholder="${editing ? '•••••••• (unchanged)' : 'Set strong password'}" class="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg" /></div>
           </div>
 
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -883,7 +960,7 @@ function renderWalkInModal() {
             <button type="button" data-open-walkin="service" class="flex-1 py-1.5 text-xs font-semibold rounded-md cursor-pointer ${!isGrv ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600'}">Walk-in E-Service</button>
           </div>
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div><label class="block text-xs font-semibold text-slate-700 mb-1">Citizen Name *</label><input name="name" type="text" required class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg" /></div>
+            <div><label class="block text-xs font-semibold text-slate-700 mb-1">Citizen Name *</label><input name="name" type="text" maxlength="120" required class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg" /></div>
             <div><label class="block text-xs font-semibold text-slate-700 mb-1">10-Digit Mobile *</label><input name="mobile" type="tel" maxlength="10" required class="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-lg" /></div>
           </div>
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -896,9 +973,9 @@ function renderWalkInModal() {
           </div>
           ${
             isGrv
-              ? `<div><label class="block text-xs font-semibold text-slate-700 mb-1">Landmark *</label><input name="landmark" type="text" required class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg" /></div>
-                 <div><label class="block text-xs font-semibold text-slate-700 mb-1">Description *</label><textarea name="description" rows="3" required class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"></textarea></div>`
-              : `<div><label class="block text-xs font-semibold text-slate-700 mb-1">Residential Address *</label><input name="address" type="text" required class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg" /></div>`
+              ? `<div><label class="block text-xs font-semibold text-slate-700 mb-1">Landmark *</label><input name="landmark" type="text" maxlength="200" required class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg" /></div>
+                 <div><label class="block text-xs font-semibold text-slate-700 mb-1">Description *</label><textarea name="description" rows="3" maxlength="2000" required class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"></textarea></div>`
+              : `<div><label class="block text-xs font-semibold text-slate-700 mb-1">Residential Address *</label><input name="address" type="text" maxlength="300" required class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg" /></div>`
           }
           <div class="pt-3 border-t border-slate-200 flex items-center justify-end gap-3">
             <button type="button" id="btn-close-walkin-2" class="px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 rounded-lg cursor-pointer">Cancel</button>
@@ -915,15 +992,15 @@ export function renderAdminPortal() {
   if (!user) return renderLoginScreen();
 
   const perms = getActivePermissions();
-  const visibleGrievances = (store.portalState.grievances || []).filter((g) => canViewGrievance(g));
-  const visibleServices = (store.portalState.services || []).filter((s) => canViewService(s));
+  const visibleGrievances = (store.staffDashboard.grievances || []).filter((g) => canViewGrievance(g));
+  const visibleServices = (store.staffDashboard.services || []).filter((s) => canViewService(s));
 
   const navItems = [
     { key: 'overview', label: 'Executive Overview', icon: ICONS.dashboard('w-4 h-4') },
     { key: 'grievances', label: 'Grievance Desk', icon: ICONS.alert('w-4 h-4') },
     { key: 'services', label: 'Citizen E-Services', icon: ICONS.fileText('w-4 h-4') },
     { key: 'access-control', label: 'Access & Roles', icon: ICONS.shield('w-4 h-4'), restricted: !perms.canManageUsers },
-    { key: 'audit-log', label: 'System Audit Log', icon: ICONS.history('w-4 h-4') },
+    { key: 'audit-log', label: 'Audit & Security', icon: ICONS.history('w-4 h-4') },
   ];
 
   const sidebarHtml = `
@@ -970,7 +1047,7 @@ export function renderAdminPortal() {
   else if (store.adminView === 'grievances') mainHtml = renderGrievancesDesk(user, visibleGrievances);
   else if (store.adminView === 'services') mainHtml = renderServicesDesk(user, visibleServices);
   else if (store.adminView === 'access-control') mainHtml = renderAccessControl(user, perms);
-  else mainHtml = renderAuditLog();
+  else mainHtml = renderAuditLog(user);
 
   return `
     <div class="min-h-[calc(100vh-44px)] bg-[#F8FAFC] flex">
@@ -1013,35 +1090,10 @@ export function renderAdminPortal() {
 }
 
 export function bindAdminEvents(root) {
-  root.querySelectorAll('[data-autofill-email]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const emailEl = root.querySelector('#admin-email');
-      const pinEl = root.querySelector('#admin-pin');
-      if (emailEl) emailEl.value = btn.getAttribute('data-autofill-email') || '';
-      if (pinEl) pinEl.value = btn.getAttribute('data-autofill-pin') || '';
-    });
-  });
-
-  root.querySelectorAll('[data-instant-login-email]').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      const res = await loginWithCredentials(
-        btn.getAttribute('data-instant-login-email') || '',
-        btn.getAttribute('data-instant-login-pin') || ''
-      );
-      if (!res.ok) {
-        const err = root.querySelector('#admin-login-error');
-        if (err) {
-          err.textContent = res.error;
-          err.classList.remove('hidden');
-        }
-      }
-    });
-  });
-
   root.querySelector('#admin-login-form')?.addEventListener('submit', async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
-    const res = await loginWithCredentials(String(fd.get('email') || ''), String(fd.get('pin') || ''));
+    const res = await loginWithCredentials(String(fd.get('identifier') || ''), String(fd.get('passcode') || ''));
     if (!res.ok) {
       const err = root.querySelector('#admin-login-error');
       if (err) {
@@ -1051,7 +1103,38 @@ export function bindAdminEvents(root) {
     }
   });
 
-  root.querySelector('#btn-admin-logout')?.addEventListener('click', () => logoutStaff());
+  root.querySelector('#bootstrap-claim-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const p1 = String(fd.get('passcode') || '');
+    const p2 = String(fd.get('confirmPasscode') || '');
+    const err = root.querySelector('#bootstrap-claim-error');
+    if (p1 !== p2) {
+      if (err) {
+        err.textContent = 'Passcodes do not match.';
+        err.classList.remove('hidden');
+      }
+      return;
+    }
+    const res = await bootstrapClaimSecretary(p1);
+    if (!res.ok && err) {
+      err.textContent = res.error || 'Setup failed.';
+      err.classList.remove('hidden');
+    }
+  });
+
+  root.querySelector('#btn-fb-signin')?.addEventListener('click', async () => {
+    await connectFirebaseGoogle();
+  });
+
+  root.querySelector('#btn-fb-signout')?.addEventListener('click', async () => {
+    await disconnectFirebaseGoogle();
+  });
+
+  root.querySelector('#btn-admin-logout')?.addEventListener('click', async () => {
+    await logoutStaff();
+  });
+
   root.querySelector('#btn-open-mobile-sidebar')?.addEventListener('click', () => {
     store.mobileSidebarOpen = true;
     notify();
@@ -1172,11 +1255,12 @@ export function bindAdminEvents(root) {
       status: String(fd.get('status') || ''),
       publicRemark: String(fd.get('publicRemark') || ''),
       internalRemark: String(fd.get('internalRemark') || ''),
-      afterPhotoUrl: String(fd.get('afterPhotoUrl') || '') || undefined,
     };
+    const afterUrl = String(fd.get('afterPhotoUrl') || '');
+    if (afterUrl) patch.afterPhotoUrl = afterUrl;
     const offEl = e.target.querySelector('[name="assignedOfficerId"]');
     if (offEl && !offEl.disabled) {
-      patch.assignedOfficerId = offEl.value;
+      patch.assignedOfficerId = offEl.value || null;
     }
     const res = await updateGrievance(id, patch);
     const msg = root.querySelector('#drawer-msg-box');
@@ -1184,7 +1268,7 @@ export function bindAdminEvents(root) {
       msg.className = `p-3 rounded-lg text-sm border ${
         res.ok ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-red-50 border-red-200 text-red-800'
       }`;
-      msg.textContent = res.ok ? 'Ticket updated and logged in Audit Trail.' : res.error || 'Update failed.';
+      msg.textContent = res.ok ? 'Ticket updated and logged in immutable Audit Trail.' : res.error || 'Update failed.';
       msg.classList.remove('hidden');
     }
   });
@@ -1199,7 +1283,7 @@ export function bindAdminEvents(root) {
     };
     const offEl = e.target.querySelector('[name="assignedOfficerId"]');
     if (offEl && !offEl.disabled) {
-      patch.assignedOfficerId = offEl.value;
+      patch.assignedOfficerId = offEl.value || null;
     }
     const res = await updateServiceApplication(id, patch);
     const msg = root.querySelector('#drawer-msg-box');
@@ -1207,7 +1291,7 @@ export function bindAdminEvents(root) {
       msg.className = `p-3 rounded-lg text-sm border ${
         res.ok ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-red-50 border-red-200 text-red-800'
       }`;
-      msg.textContent = res.ok ? 'Application updated and logged in Audit Trail.' : res.error || 'Update failed.';
+      msg.textContent = res.ok ? 'Application updated and logged in immutable Audit Trail.' : res.error || 'Update failed.';
       msg.classList.remove('hidden');
     }
   });
@@ -1246,7 +1330,7 @@ export function bindAdminEvents(root) {
   root.querySelectorAll('[data-edit-staff]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const id = btn.getAttribute('data-edit-staff');
-      const st = (store.portalState.staff || []).find((s) => s.id === id);
+      const st = (store.staffDashboard.staff || []).find((s) => s.id === id);
       store.editingStaffId = id;
       store.staffModalWards = st ? [...st.assignedWards] : [1];
       store.staffModalOpen = true;
@@ -1292,10 +1376,11 @@ export function bindAdminEvents(root) {
       }
       return;
     }
+    const uname = String(fd.get('username') || '').trim();
     const payload = {
       name: String(fd.get('name') || ''),
+      ...(uname ? { username: uname } : {}),
       email: String(fd.get('email') || ''),
-      pin: String(fd.get('pin') || '6006'),
       designation: String(fd.get('designation') || ''),
       role: String(fd.get('role') || 'WARD_OFFICER'),
       department: String(fd.get('department') || 'Roads & Streetlights'),
@@ -1309,6 +1394,9 @@ export function bindAdminEvents(root) {
         canDeleteRecords: fd.get('perm_canDeleteRecords') === 'on',
       },
     };
+    const passcode = String(fd.get('passcode') || '').trim();
+    if (passcode) payload.passcode = passcode;
+
     const res = await saveStaff(store.editingStaffId, payload);
     if (!res.ok) {
       const err = root.querySelector('#staff-modal-error');
@@ -1320,6 +1408,21 @@ export function bindAdminEvents(root) {
     }
     store.staffModalOpen = false;
     notify();
+  });
+
+  root.querySelector('#maintenance-reset-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const res = await maintenanceReset(
+      String(fd.get('confirmPhrase') || ''),
+      String(fd.get('maintenanceKey') || '')
+    );
+    const msg = root.querySelector('#maint-reset-msg');
+    if (msg && !res.ok) {
+      msg.className = 'mt-3 p-2.5 rounded-lg text-xs bg-red-50 border border-red-200 text-red-800';
+      msg.textContent = res.error || 'Reset failed.';
+      msg.classList.remove('hidden');
+    }
   });
 
   root.querySelectorAll('[data-open-walkin]').forEach((btn) => {
@@ -1344,28 +1447,34 @@ export function bindAdminEvents(root) {
     if (!name || !/^\d{10}$/.test(mobile)) return;
 
     if (store.walkInType === 'grievance') {
-      const created = await submitGrievance({
-        citizenName: name,
-        mobile,
-        ward,
-        category: String(fd.get('category') || 'Water Supply'),
-        landmark: String(fd.get('landmark') || ''),
-        description: String(fd.get('description') || ''),
-      });
-      if (created) store.selectedGrievanceId = created.id;
+      const res = await submitGrievance(
+        {
+          citizenName: name,
+          mobile,
+          ward,
+          category: String(fd.get('category') || 'Water Supply'),
+          landmark: String(fd.get('landmark') || ''),
+          description: String(fd.get('description') || ''),
+        },
+        true
+      );
+      if (res.ok && res.ticket) store.selectedGrievanceId = res.ticket.id;
     } else {
       const serviceId = String(fd.get('serviceId') || 'residence');
       const cat = SERVICE_CATALOG.find((c) => c.id === serviceId) || SERVICE_CATALOG[0];
-      const created = await submitServiceApplication({
-        serviceId,
-        applicantName: name,
-        mobile,
-        ward,
-        address: String(fd.get('address') || ''),
-        checkedDocs: cat.requiredDocsEn,
-        uploadedDocNames: ['walkin_physical_docs_verified.pdf'],
-      });
-      if (created) store.selectedServiceId = created.id;
+      const res = await submitServiceApplication(
+        {
+          serviceId,
+          applicantName: name,
+          mobile,
+          ward,
+          address: String(fd.get('address') || ''),
+          checkedDocs: cat.requiredDocsEn,
+          uploadedDocNames: ['walkin_physical_docs_verified.pdf'],
+        },
+        true
+      );
+      if (res.ok && res.application) store.selectedServiceId = res.application.id;
     }
     store.walkInType = null;
     notify();

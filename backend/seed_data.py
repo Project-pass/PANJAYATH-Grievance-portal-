@@ -169,8 +169,8 @@ def get_initial_state():
             {
                 "id": "stf-secretary",
                 "name": "Meera Nair",
+                "username": "admin_test",
                 "email": "secretary@abcpanchayat.gov.in",
-                "pin": "1001",
                 "designation": "Panchayat Secretary",
                 "role": "SUPER_ADMIN",
                 "department": "General Administration",
@@ -181,8 +181,8 @@ def get_initial_state():
             {
                 "id": "stf-rahul",
                 "name": "Rahul Menon",
+                "username": "rahul_roads",
                 "email": "rahul.roads@abcpanchayat.gov.in",
-                "pin": "2002",
                 "designation": "Assistant Engineer (Roads & Lights)",
                 "role": "WARD_OFFICER",
                 "department": "Roads & Streetlights",
@@ -193,8 +193,8 @@ def get_initial_state():
             {
                 "id": "stf-anitha",
                 "name": "Anitha Kumari",
+                "username": "anitha_water",
                 "email": "anitha.water@abcpanchayat.gov.in",
-                "pin": "3003",
                 "designation": "Water & Sanitation Inspector",
                 "role": "WARD_OFFICER",
                 "department": "Water & Sanitation",
@@ -205,8 +205,8 @@ def get_initial_state():
             {
                 "id": "stf-suresh",
                 "name": "Dr. Suresh Babu",
+                "username": "suresh_health",
                 "email": "suresh.health@abcpanchayat.gov.in",
-                "pin": "4004",
                 "designation": "Public Health & Sanitation Officer",
                 "role": "WARD_OFFICER",
                 "department": "Public Health",
@@ -217,8 +217,8 @@ def get_initial_state():
             {
                 "id": "stf-deepak",
                 "name": "Deepak Varma",
+                "username": "deepak_csc",
                 "email": "deepak.csc@abcpanchayat.gov.in",
-                "pin": "5005",
                 "designation": "CSC Front-Desk Operator",
                 "role": "CSC_OPERATOR",
                 "department": "Revenue & Certificates",

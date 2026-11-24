@@ -24,35 +24,19 @@ import {
   submitFeedback,
   submitGrievance,
   submitServiceApplication,
+  trackApplication,
 } from './store.js';
 
-function computeTransparencyStats() {
-  const grievances = store.portalState.grievances || [];
-  const resolved = grievances.filter((g) => g.status === 'Resolved');
-  const totalAvgDays = resolved.reduce((acc, g) => {
-    if (!g.resolvedAt) return acc + 3;
-    const diff = (new Date(g.resolvedAt).getTime() - new Date(g.createdAt).getTime()) / 86400000;
-    return acc + Math.max(1, diff);
-  }, 0);
-  const avgDays = resolved.length > 0 ? (totalAvgDays / resolved.length).toFixed(1) : '3.2';
-  const rated = grievances.filter((g) => typeof g.rating === 'number');
-  const avgRating =
-    rated.length > 0
-      ? (rated.reduce((s, g) => s + g.rating, 0) / rated.length).toFixed(1)
-      : '4.6';
-
-  return {
-    resolvedCount: resolved.length + 142,
-    avgDays,
-    activeServicesCount: SERVICE_CATALOG.length,
-    avgRating,
-  };
-}
-
 function renderHomeView(copy) {
-  const stats = computeTransparencyStats();
+  const stats = store.publicOverview.stats || {
+    resolvedCount: 145,
+    avgDays: '3.2',
+    activeServicesCount: 6,
+    avgRating: '4.6',
+  };
   const lang = store.language;
-  const recent = (store.portalState.grievances || []).slice(0, 4);
+  const recent = (store.publicOverview.recentWorks || []).slice(0, 5);
+  const slaLimit = store.publicOverview.slaLimitDays || 7;
 
   return `
     <div>
@@ -111,22 +95,22 @@ function renderHomeView(copy) {
           <div class="mt-10 grid grid-cols-2 lg:grid-cols-4 gap-4">
             <div class="bg-[#F8FAFC] border border-slate-200 rounded-xl p-5">
               <p class="text-xs font-medium text-slate-500">${esc(copy.statsResolved)}</p>
-              <p class="mt-1.5 text-2xl sm:text-3xl font-bold font-mono tabular-nums text-[#1E3A8A]">${stats.resolvedCount}</p>
+              <p class="mt-1.5 text-2xl sm:text-3xl font-bold font-mono tabular-nums text-[#1E3A8A]">${esc(stats.resolvedCount)}</p>
               <p class="mt-1 text-xs text-slate-500">FY 2026–27 across 15 wards</p>
             </div>
             <div class="bg-[#F8FAFC] border border-slate-200 rounded-xl p-5">
               <p class="text-xs font-medium text-slate-500">${esc(copy.statsAvgTime)}</p>
-              <p class="mt-1.5 text-2xl sm:text-3xl font-bold font-mono tabular-nums text-[#059669]">${stats.avgDays} ${esc(copy.daysUnit)}</p>
-              <p class="mt-1 text-xs text-slate-500">Against ${store.portalState.slaLimitDays}-day SLA mandate</p>
+              <p class="mt-1.5 text-2xl sm:text-3xl font-bold font-mono tabular-nums text-[#059669]">${esc(stats.avgDays)} ${esc(copy.daysUnit)}</p>
+              <p class="mt-1 text-xs text-slate-500">Against ${slaLimit}-day SLA mandate</p>
             </div>
             <div class="bg-[#F8FAFC] border border-slate-200 rounded-xl p-5">
               <p class="text-xs font-medium text-slate-500">${esc(copy.statsActiveServices)}</p>
-              <p class="mt-1.5 text-2xl sm:text-3xl font-bold font-mono tabular-nums text-slate-900">${stats.activeServicesCount}</p>
+              <p class="mt-1.5 text-2xl sm:text-3xl font-bold font-mono tabular-nums text-slate-900">${esc(stats.activeServicesCount)}</p>
               <p class="mt-1 text-xs text-slate-500">Certificates & Permits online</p>
             </div>
             <div class="bg-[#F8FAFC] border border-slate-200 rounded-xl p-5">
               <p class="text-xs font-medium text-slate-500">${esc(copy.statsSatisfaction)}</p>
-              <p class="mt-1.5 text-2xl sm:text-3xl font-bold font-mono tabular-nums text-slate-900">${stats.avgRating} / 5.0</p>
+              <p class="mt-1.5 text-2xl sm:text-3xl font-bold font-mono tabular-nums text-slate-900">${esc(stats.avgRating)} / 5.0</p>
               <p class="mt-1 text-xs text-slate-500">Verified citizen feedback</p>
             </div>
           </div>
@@ -180,10 +164,10 @@ function renderHomeView(copy) {
           <div class="flex flex-wrap items-center justify-between gap-4 pb-5 border-b border-slate-200">
             <div>
               <h2 class="font-display text-xl font-bold text-slate-900">Recent Civic Redressal Log</h2>
-              <p class="text-sm text-slate-600 mt-0.5">Inspect live field action across Wards 1–15 by clicking any tracking ID.</p>
+              <p class="text-sm text-slate-600 mt-0.5">Anonymized ward-level redressal ledger (citizen personal details protected).</p>
             </div>
             <button type="button" data-cnav="track" class="text-sm font-semibold text-[#1E3A8A] hover:underline whitespace-nowrap shrink-0 cursor-pointer">
-              View all in Status Tracker
+              Open Verified Status Tracker
             </button>
           </div>
           <div class="divide-y divide-slate-200">
@@ -193,7 +177,7 @@ function renderHomeView(copy) {
                 <div class="py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   <div class="min-w-0">
                     <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                      <button type="button" data-track-id="${esc(item.id)}" class="font-mono font-semibold text-[#1E3A8A] hover:underline cursor-pointer">${esc(item.id)}</button>
+                      <button type="button" data-prefill-track="${esc(item.id)}" class="font-mono font-semibold text-[#1E3A8A] hover:underline cursor-pointer">${esc(item.id)}</button>
                       <span aria-hidden="true">·</span>
                       <span>Ward ${item.ward}</span>
                       <span aria-hidden="true">·</span>
@@ -201,10 +185,10 @@ function renderHomeView(copy) {
                       <span aria-hidden="true">·</span>
                       <span class="font-mono tabular-nums">${esc(formatShortDate(item.createdAt))}</span>
                     </div>
-                    <p class="mt-1 text-sm font-medium text-slate-900 truncate">${esc(item.landmark)} — ${esc(item.description)}</p>
+                    <p class="mt-1 text-sm font-medium text-slate-700">${esc(item.department)} · Ward ${item.ward} Civic Redressal</p>
                   </div>
                   <div class="flex items-center gap-3 shrink-0">
-                    ${renderSlaBadge(item, store.portalState.slaLimitDays)}
+                    ${renderSlaBadge(item, slaLimit)}
                     ${renderStatusLabel(item.status, lang, STATUS_ML)}
                   </div>
                 </div>`
@@ -220,6 +204,7 @@ function renderHomeView(copy) {
 function renderGrievanceView(copy) {
   const lang = store.language;
   const sub = store.submittedGrievance;
+  const token = store.submittedGrievanceToken;
 
   if (sub) {
     return `
@@ -239,20 +224,28 @@ function renderGrievanceView(copy) {
             </div>
           </div>
 
+          <div class="mt-5 p-4 rounded-lg bg-indigo-50 border border-indigo-200 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p class="text-xs font-semibold text-[#1E3A8A]">Private Verification Token (Save Securely)</p>
+              <p class="text-xs text-slate-600 mt-0.5">Required alongside the last 4 digits of your mobile number to view timeline updates.</p>
+            </div>
+            <p class="font-mono text-sm font-bold text-slate-900 bg-white px-3 py-1.5 rounded border border-indigo-200 select-all">${esc(token)}</p>
+          </div>
+
           <dl class="mt-6 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-4 text-sm">
-            <div><dt class="text-xs text-slate-500">Citizen Name</dt><dd class="font-medium text-slate-900 mt-0.5">${esc(sub.citizenName)}</dd></div>
-            <div><dt class="text-xs text-slate-500">Mobile Number</dt><dd class="font-mono tabular-nums text-slate-900 mt-0.5">${esc(sub.mobile)}</dd></div>
+            <div><dt class="text-xs text-slate-500">Citizen Name</dt><dd class="font-medium text-slate-900 mt-0.5">${esc(sub.citizenName || sub.citizenDisplay)}</dd></div>
+            <div><dt class="text-xs text-slate-500">Registered Mobile</dt><dd class="font-mono tabular-nums text-slate-900 mt-0.5">******${esc(sub.mobileLast4)}</dd></div>
             <div><dt class="text-xs text-slate-500">Ward & Category</dt><dd class="font-medium text-slate-900 mt-0.5">Ward ${sub.ward} · ${esc(sub.category)}</dd></div>
             <div><dt class="text-xs text-slate-500">Routed Department</dt><dd class="font-medium text-slate-900 mt-0.5">${esc(sub.department)}${sub.assignedOfficerName ? ` (${esc(sub.assignedOfficerName)})` : ''}</dd></div>
             <div class="sm:col-span-2"><dt class="text-xs text-slate-500">Landmark & Description</dt><dd class="text-slate-800 mt-0.5"><strong>${esc(sub.landmark)}:</strong> ${esc(sub.description)}</dd></div>
             <div><dt class="text-xs text-slate-500">Registered At</dt><dd class="font-mono tabular-nums text-slate-700 mt-0.5">${esc(formatDateTime(sub.createdAt))}</dd></div>
-            <div><dt class="text-xs text-slate-500">SLA Deadline</dt><dd class="font-mono tabular-nums text-slate-700 mt-0.5">Within ${store.portalState.slaLimitDays} Days</dd></div>
+            <div><dt class="text-xs text-slate-500">SLA Deadline</dt><dd class="font-mono tabular-nums text-slate-700 mt-0.5">Within ${store.publicOverview.slaLimitDays} Days</dd></div>
           </dl>
 
           <div class="no-print mt-8 pt-6 border-t border-slate-200 flex flex-wrap items-center gap-3">
             <button type="button" id="btn-print-slip" class="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white bg-[#1E3A8A] hover:bg-[#172E6E] rounded-lg cursor-pointer">${ICONS.printer('w-4 h-4')}<span>${esc(copy.printSlip)}</span></button>
             <button type="button" id="btn-dl-grv-slip" class="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg cursor-pointer">${ICONS.download('w-4 h-4')}<span>${esc(copy.downloadSlip)}</span></button>
-            <button type="button" data-track-id="${esc(sub.id)}" class="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-[#059669] bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg cursor-pointer">${ICONS.search('w-4 h-4')}<span>${esc(copy.trackThisNow)}</span></button>
+            <button type="button" id="btn-track-submitted-grv" class="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-[#059669] bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg cursor-pointer">${ICONS.search('w-4 h-4')}<span>${esc(copy.trackThisNow)}</span></button>
             <button type="button" id="btn-submit-another-grv" class="ml-auto text-sm font-medium text-slate-600 hover:text-slate-900 cursor-pointer">${esc(copy.submitAnother)}</button>
           </div>
         </div>
@@ -271,7 +264,7 @@ function renderGrievanceView(copy) {
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-5">
             <div>
               <label for="grv-name" class="block text-sm font-medium text-slate-700 mb-1.5">${esc(copy.citizenName)} *</label>
-              <input id="grv-name" name="citizenName" type="text" required placeholder="e.g. Suresh Nair" class="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1E3A8A]" />
+              <input id="grv-name" name="citizenName" type="text" maxlength="120" required placeholder="e.g. Suresh Nair" class="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1E3A8A]" />
             </div>
             <div>
               <label for="grv-mobile" class="block text-sm font-medium text-slate-700 mb-1.5">${esc(copy.mobileNumber)} *</label>
@@ -296,12 +289,12 @@ function renderGrievanceView(copy) {
 
           <div>
             <label for="grv-landmark" class="block text-sm font-medium text-slate-700 mb-1.5">${esc(copy.landmarkLabel)} *</label>
-            <input id="grv-landmark" name="landmark" type="text" required placeholder="e.g. Near Anganwadi No. 2, Main Cross Road" class="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1E3A8A]" />
+            <input id="grv-landmark" name="landmark" type="text" maxlength="200" required placeholder="e.g. Near Anganwadi No. 2, Main Cross Road" class="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1E3A8A]" />
           </div>
 
           <div>
             <label for="grv-desc" class="block text-sm font-medium text-slate-700 mb-1.5">${esc(copy.descriptionLabel)} *</label>
-            <textarea id="grv-desc" name="description" rows="4" required placeholder="Describe the exact problem, duration, and impact..." class="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1E3A8A]"></textarea>
+            <textarea id="grv-desc" name="description" rows="4" maxlength="2000" required placeholder="Describe the exact problem, duration, and impact..." class="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1E3A8A]"></textarea>
           </div>
 
           <div>
@@ -309,8 +302,8 @@ function renderGrievanceView(copy) {
             <div class="flex flex-wrap items-center gap-3">
               <label class="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-lg cursor-pointer">
                 ${ICONS.upload('w-4 h-4')}
-                <span>Upload Photo File</span>
-                <input id="grv-photo-input" type="file" accept="image/*" class="hidden" />
+                <span>Upload Photo File (PNG/JPG)</span>
+                <input id="grv-photo-input" type="file" accept="image/png,image/jpeg,image/webp" class="hidden" />
               </label>
               <button type="button" data-sample-photo="${IMG_ROAD_BEFORE}" class="px-3 py-2 text-xs font-medium text-[#1E3A8A] bg-indigo-50 hover:bg-indigo-100 rounded-lg cursor-pointer">Use Sample Road Photo</button>
               <button type="button" data-sample-photo="${IMG_WATER_LEAK}" class="px-3 py-2 text-xs font-medium text-[#1E3A8A] bg-indigo-50 hover:bg-indigo-100 rounded-lg cursor-pointer">Use Sample Pipe Leak Photo</button>
@@ -338,6 +331,7 @@ function renderGrievanceView(copy) {
 function renderServicesView(copy) {
   const lang = store.language;
   const sub = store.submittedService;
+  const token = store.submittedServiceToken;
   const sel = store.selectedService;
 
   if (sub) {
@@ -358,9 +352,17 @@ function renderServicesView(copy) {
             </div>
           </div>
 
+          <div class="mt-5 p-4 rounded-lg bg-indigo-50 border border-indigo-200 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p class="text-xs font-semibold text-[#1E3A8A]">Private Verification Token (Save Securely)</p>
+              <p class="text-xs text-slate-600 mt-0.5">Required alongside the last 4 digits of your mobile number to view verification status.</p>
+            </div>
+            <p class="font-mono text-sm font-bold text-slate-900 bg-white px-3 py-1.5 rounded border border-indigo-200 select-all">${esc(token)}</p>
+          </div>
+
           <dl class="mt-6 grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
-            <div><dt class="text-xs text-slate-500">Applicant Name</dt><dd class="font-medium text-slate-900 mt-0.5">${esc(sub.applicantName)}</dd></div>
-            <div><dt class="text-xs text-slate-500">Ward & Mobile</dt><dd class="font-mono tabular-nums text-slate-900 mt-0.5">Ward ${sub.ward} · ${esc(sub.mobile)}</dd></div>
+            <div><dt class="text-xs text-slate-500">Applicant Name</dt><dd class="font-medium text-slate-900 mt-0.5">${esc(sub.applicantName || sub.applicantDisplay)}</dd></div>
+            <div><dt class="text-xs text-slate-500">Ward & Mobile</dt><dd class="font-mono tabular-nums text-slate-900 mt-0.5">Ward ${sub.ward} · ******${esc(sub.mobileLast4)}</dd></div>
             <div><dt class="text-xs text-slate-500">Statutory Fee</dt><dd class="font-mono tabular-nums text-slate-900 mt-0.5">${sub.feeInr === 0 ? esc(copy.freeLabel) : `INR ${sub.feeInr}.00`}</dd></div>
             <div><dt class="text-xs text-slate-500">Submitted At</dt><dd class="font-mono tabular-nums text-slate-700 mt-0.5">${esc(formatDateTime(sub.createdAt))}</dd></div>
             <div class="sm:col-span-2"><dt class="text-xs text-slate-500">Confirmed Document Checklist</dt><dd class="mt-1 text-slate-800">${esc((sub.checkedDocs || []).join(' · '))}</dd></div>
@@ -369,7 +371,7 @@ function renderServicesView(copy) {
           <div class="no-print mt-8 pt-6 border-t border-slate-200 flex flex-wrap items-center gap-3">
             <button type="button" id="btn-print-slip" class="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white bg-[#1E3A8A] hover:bg-[#172E6E] rounded-lg cursor-pointer">${ICONS.printer('w-4 h-4')}<span>${esc(copy.printSlip)}</span></button>
             <button type="button" id="btn-dl-srv-slip" class="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg cursor-pointer">${ICONS.download('w-4 h-4')}<span>${esc(copy.downloadSlip)}</span></button>
-            <button type="button" data-track-id="${esc(sub.id)}" class="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-[#059669] bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg cursor-pointer">${ICONS.search('w-4 h-4')}<span>${esc(copy.trackThisNow)}</span></button>
+            <button type="button" id="btn-track-submitted-srv" class="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-[#059669] bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg cursor-pointer">${ICONS.search('w-4 h-4')}<span>${esc(copy.trackThisNow)}</span></button>
             <button type="button" id="btn-back-catalog" class="ml-auto text-sm font-medium text-slate-600 hover:text-slate-900 cursor-pointer">Back to Service Catalog</button>
           </div>
         </div>
@@ -399,7 +401,7 @@ function renderServicesView(copy) {
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-5">
               <div>
                 <label for="srv-name" class="block text-sm font-medium text-slate-700 mb-1.5">Applicant Full Name *</label>
-                <input id="srv-name" name="applicantName" type="text" required placeholder="e.g. Kavitha Krishnan" class="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-lg" />
+                <input id="srv-name" name="applicantName" type="text" maxlength="120" required placeholder="e.g. Kavitha Krishnan" class="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-lg" />
               </div>
               <div>
                 <label for="srv-mobile" class="block text-sm font-medium text-slate-700 mb-1.5">${esc(copy.mobileNumber)} *</label>
@@ -416,7 +418,7 @@ function renderServicesView(copy) {
               </div>
               <div class="sm:col-span-2">
                 <label for="srv-address" class="block text-sm font-medium text-slate-700 mb-1.5">House Name / Door Number & Address *</label>
-                <input id="srv-address" name="address" type="text" required placeholder="House No. 4/112, Temple Road, ABC Gram Panchayat" class="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-lg" />
+                <input id="srv-address" name="address" type="text" maxlength="300" required placeholder="House No. 4/112, Temple Road, ABC Gram Panchayat" class="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-lg" />
               </div>
             </div>
 
@@ -495,41 +497,38 @@ function renderServicesView(copy) {
 
 function renderTrackView(copy) {
   const lang = store.language;
-  const q = store.trackQuery.trim().toUpperCase();
-  const grv = (store.portalState.grievances || []).find((g) => g.id.toUpperCase() === q);
-  const srv = !grv ? (store.portalState.services || []).find((s) => s.id.toUpperCase() === q) : null;
-  const record = grv ? { kind: 'grievance', data: grv } : srv ? { kind: 'service', data: srv } : null;
-
-  const sampleIds = [
-    ...(store.portalState.grievances || []).slice(0, 3).map((g) => g.id),
-    ...(store.portalState.services || []).slice(0, 2).map((s) => s.id),
-  ];
+  const record = store.trackedRecord;
+  const slaLimit = store.publicOverview.slaLimitDays || 7;
 
   return `
     <section class="max-w-[1000px] mx-auto px-4 sm:px-6 py-10">
       <div class="bg-white border border-slate-200 rounded-xl p-6 sm:p-8">
         <h1 class="font-display text-2xl font-bold text-slate-900">${esc(copy.trackerTitle)}</h1>
-        <p class="mt-1.5 text-sm text-slate-600">${esc(copy.trackerSub)}</p>
+        <p class="mt-1.5 text-sm text-slate-600">Enter your Tracking ID, Verification Token (from your acknowledgement slip), and last 4 digits of your registered mobile number.</p>
 
-        <form id="tracker-search-form" class="mt-5 flex flex-col sm:flex-row gap-3">
-          <div class="relative flex-1">
-            <span class="text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2">${ICONS.search('w-4 h-4')}</span>
-            <input id="tracker-input" type="text" value="${esc(store.trackQuery)}" placeholder="${esc(copy.trackerPlaceholder)}" class="w-full pl-10 pr-4 py-2.5 text-sm font-mono border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1E3A8A]" />
+        <form id="tracker-search-form" class="mt-5 grid grid-cols-1 sm:grid-cols-12 gap-3">
+          <div class="sm:col-span-4">
+            <label for="tracker-input" class="block text-xs font-medium text-slate-600 mb-1">Tracking ID</label>
+            <input id="tracker-input" name="trackingId" type="text" required value="${esc(store.trackQuery)}" placeholder="ABC-GRV-2026-109" class="w-full px-3.5 py-2.5 text-sm font-mono border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1E3A8A]" />
           </div>
-          <button type="submit" class="px-5 py-2.5 text-sm font-semibold text-white bg-[#1E3A8A] hover:bg-[#172E6E] rounded-lg whitespace-nowrap shrink-0 cursor-pointer">${esc(copy.searchBtn)}</button>
+          <div class="sm:col-span-4">
+            <label for="tracker-token-input" class="block text-xs font-medium text-slate-600 mb-1">Verification Token</label>
+            <input id="tracker-token-input" name="trackingToken" type="text" required value="${esc(store.trackToken)}" placeholder="TK-..." class="w-full px-3.5 py-2.5 text-sm font-mono border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1E3A8A]" />
+          </div>
+          <div class="sm:col-span-2">
+            <label for="tracker-last4-input" class="block text-xs font-medium text-slate-600 mb-1">Mobile Last 4</label>
+            <input id="tracker-last4-input" name="mobileLast4" type="text" maxlength="4" required value="${esc(store.trackMobileLast4)}" placeholder="0000" class="w-full px-3.5 py-2.5 text-sm font-mono tabular-nums border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1E3A8A]" />
+          </div>
+          <div class="sm:col-span-2 flex items-end">
+            <button type="submit" class="w-full px-4 py-2.5 text-sm font-semibold text-white bg-[#1E3A8A] hover:bg-[#172E6E] rounded-lg whitespace-nowrap cursor-pointer">${esc(copy.searchBtn)}</button>
+          </div>
         </form>
 
-        <div class="mt-4 flex flex-wrap items-center gap-2 text-xs">
-          <span class="text-slate-500 font-medium">${esc(copy.sampleIdsLabel)}</span>
-          ${sampleIds
-            .map(
-              (sid) => `
-              <button type="button" data-track-id="${esc(sid)}" class="px-2.5 py-1 font-mono rounded border transition-colors cursor-pointer ${
-                q === sid ? 'bg-[#1E3A8A] text-white border-[#1E3A8A]' : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
-              }">${esc(sid)}</button>`
-            )
-            .join('')}
-        </div>
+        ${
+          store.trackError
+            ? `<div class="mt-4 p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-800">${esc(store.trackError)}</div>`
+            : ''
+        }
       </div>
 
       ${
@@ -539,50 +538,50 @@ function renderTrackView(copy) {
           <div class="flex flex-wrap items-start justify-between gap-4 pb-6 border-b border-slate-200">
             <div>
               <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                <span class="font-mono font-semibold text-[#1E3A8A]">${esc(record.data.id)}</span>
+                <span class="font-mono font-semibold text-[#1E3A8A]">${esc(record.id)}</span>
                 <span>·</span>
-                <span>Ward ${record.data.ward}</span>
+                <span>Ward ${record.ward}</span>
                 <span>·</span>
-                <span>${esc(record.data.department)}</span>
+                <span>${esc(record.department)}</span>
                 <span>·</span>
-                <span class="font-mono tabular-nums">Filed ${esc(formatShortDate(record.data.createdAt))}</span>
+                <span class="font-mono tabular-nums">Filed ${esc(formatShortDate(record.createdAt))}</span>
               </div>
               <h2 class="mt-2 font-display text-xl font-bold text-slate-900">
                 ${
                   record.kind === 'grievance'
-                    ? `${esc(record.data.category)} — ${esc(record.data.landmark)}`
-                    : esc(record.data.serviceName)
+                    ? `${esc(record.category)} — ${esc(record.landmark)}`
+                    : esc(record.serviceName)
                 }
               </h2>
               <p class="mt-1 text-sm text-slate-600">
                 ${
                   record.kind === 'grievance'
-                    ? esc(record.data.description)
-                    : `Applicant: ${esc(record.data.applicantName)} · ${esc(record.data.address)}`
+                    ? `${esc(record.citizenDisplay)} · ${esc(record.description)}`
+                    : `Applicant: ${esc(record.applicantDisplay)} · Statutory Fee: ${record.feeInr === 0 ? esc(copy.freeLabel) : `₹${record.feeInr}`}`
                 }
               </p>
             </div>
             <div class="flex flex-col items-start sm:items-end gap-2">
-              ${renderStatusLabel(record.data.status, lang, STATUS_ML)}
-              ${renderSlaBadge(record.data, store.portalState.slaLimitDays)}
+              ${renderStatusLabel(record.status, lang, STATUS_ML)}
+              ${renderSlaBadge(record, slaLimit)}
             </div>
           </div>
 
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 bg-[#F8FAFC] border border-slate-200 rounded-lg p-4 text-sm">
             <div>
               <p class="text-xs font-medium text-slate-500">Assigned Officer & Dept</p>
-              <p class="mt-1 font-semibold text-slate-900">${esc(record.data.assignedOfficerName || 'Pending Desk Assignment')} · ${esc(record.data.department)}</p>
+              <p class="mt-1 font-semibold text-slate-900">${esc(record.assignedOfficerName || 'Pending Desk Assignment')} · ${esc(record.department)}</p>
             </div>
             <div>
               <p class="text-xs font-medium text-slate-500">Latest Official Remark</p>
-              <p class="mt-1 text-slate-800">${esc((record.kind === 'grievance' ? record.data.publicRemark : record.data.officialRemark) || 'Awaiting officer update.')}</p>
+              <p class="mt-1 text-slate-800">${esc((record.kind === 'grievance' ? record.publicRemark : record.officialRemark) || 'Awaiting officer update.')}</p>
             </div>
           </div>
 
           <div>
             <h3 class="font-display text-base font-bold text-slate-900 mb-4">${esc(copy.timelineHeading)}</h3>
             <ol class="relative space-y-6 pl-6 before:absolute before:left-[9px] before:top-2 before:bottom-2 before:w-px before:bg-slate-200">
-              ${(record.data.timeline || [])
+              ${(record.timeline || [])
                 .map((step, idx, arr) => {
                   const isLast = idx === arr.length - 1;
                   return `
@@ -603,19 +602,19 @@ function renderTrackView(copy) {
           </div>
 
           ${
-            record.kind === 'grievance' && (record.data.beforePhotoUrl || record.data.afterPhotoUrl)
+            record.kind === 'grievance' && (record.beforePhotoUrl || record.afterPhotoUrl)
               ? `
             <div class="pt-6 border-t border-slate-200">
               <h3 class="font-display text-base font-bold text-slate-900 mb-4">${esc(copy.beforeAfterHeading)}</h3>
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-5">
                 ${
-                  record.data.beforePhotoUrl
-                    ? `<div><p class="text-xs font-semibold text-slate-600 mb-2">${esc(copy.beforeLabel)}</p><img src="${esc(record.data.beforePhotoUrl)}" alt="Citizen reported issue photo" referrerpolicy="no-referrer" class="w-full h-56 object-cover rounded-lg border border-slate-200" /></div>`
+                  record.beforePhotoUrl
+                    ? `<div><p class="text-xs font-semibold text-slate-600 mb-2">${esc(copy.beforeLabel)}</p><img src="${esc(record.beforePhotoUrl)}" alt="Citizen reported issue photo" referrerpolicy="no-referrer" class="w-full h-56 object-cover rounded-lg border border-slate-200" /></div>`
                     : ''
                 }
                 ${
-                  record.data.afterPhotoUrl
-                    ? `<div><p class="text-xs font-semibold text-[#059669] mb-2">${esc(copy.afterLabel)}</p><img src="${esc(record.data.afterPhotoUrl)}" alt="Officer verified resolution proof" referrerpolicy="no-referrer" class="w-full h-56 object-cover rounded-lg border border-emerald-200" /></div>`
+                  record.afterPhotoUrl
+                    ? `<div><p class="text-xs font-semibold text-[#059669] mb-2">${esc(copy.afterLabel)}</p><img src="${esc(record.afterPhotoUrl)}" alt="Officer verified resolution proof" referrerpolicy="no-referrer" class="w-full h-56 object-cover rounded-lg border border-emerald-200" /></div>`
                     : ''
                 }
               </div>
@@ -624,23 +623,23 @@ function renderTrackView(copy) {
           }
 
           ${
-            record.kind === 'grievance' && record.data.status === 'Resolved'
+            record.kind === 'grievance' && record.status === 'Resolved'
               ? `
             <div class="pt-6 border-t border-slate-200">
               <h3 class="font-display text-base font-bold text-slate-900">${esc(copy.feedbackHeading)}</h3>
               ${
-                record.data.rating
+                record.rating
                   ? `<div class="mt-3 p-4 rounded-lg bg-emerald-50 border border-emerald-200 flex flex-wrap items-center justify-between gap-3">
                       <div>
                         <p class="text-sm font-semibold text-emerald-900">${esc(copy.feedbackSaved)}</p>
-                        ${record.data.feedbackComment ? `<p class="text-xs text-emerald-800 mt-1">“${esc(record.data.feedbackComment)}”</p>` : ''}
+                        ${record.feedbackComment ? `<p class="text-xs text-emerald-800 mt-1">“${esc(record.feedbackComment)}”</p>` : ''}
                       </div>
                       <div class="flex items-center gap-1 text-amber-500">
-                        ${[1, 2, 3, 4, 5].map((st) => ICONS.star('w-4 h-4', st <= record.data.rating)).join('')}
-                        <span class="ml-1.5 text-xs font-mono font-bold text-slate-800">${record.data.rating}/5</span>
+                        ${[1, 2, 3, 4, 5].map((st) => ICONS.star('w-4 h-4', st <= record.rating)).join('')}
+                        <span class="ml-1.5 text-xs font-mono font-bold text-slate-800">${record.rating}/5</span>
                       </div>
                     </div>`
-                  : `<form id="citizen-feedback-form" data-ticket-id="${esc(record.data.id)}" class="mt-2 bg-[#F8FAFC] border border-slate-200 rounded-lg p-4 space-y-3">
+                  : `<form id="citizen-feedback-form" data-ticket-id="${esc(record.id)}" class="mt-2 bg-[#F8FAFC] border border-slate-200 rounded-lg p-4 space-y-3">
                       <p class="text-sm text-slate-600">${esc(copy.feedbackDesc)}</p>
                       <div class="flex items-center gap-1.5">
                         ${[1, 2, 3, 4, 5]
@@ -652,7 +651,7 @@ function renderTrackView(copy) {
                           .join('')}
                         <span class="ml-2 text-xs font-mono text-slate-600">${store.ratingDraft} / 5</span>
                       </div>
-                      <input id="feedback-comment" type="text" placeholder="Optional citizen comment..." class="w-full px-3 py-2 text-sm bg-white border border-slate-300 rounded-lg" />
+                      <input id="feedback-comment" type="text" maxlength="400" placeholder="Optional citizen comment..." class="w-full px-3 py-2 text-sm bg-white border border-slate-300 rounded-lg" />
                       <button type="submit" class="px-4 py-2 text-sm font-semibold text-white bg-[#059669] hover:bg-[#047857] rounded-lg cursor-pointer">${esc(copy.submitFeedbackBtn)}</button>
                     </form>`
               }
@@ -660,7 +659,7 @@ function renderTrackView(copy) {
               : ''
           }
         </div>`
-          : `<div class="mt-6 bg-white border border-slate-200 rounded-xl p-8 text-center"><p class="text-sm font-medium text-slate-700">${esc(copy.noRecordFound)}</p></div>`
+          : `<div class="mt-6 bg-white border border-slate-200 rounded-xl p-8 text-center"><p class="text-sm text-slate-600">Submit your Tracking ID, Verification Token, and mobile last 4 digits to inspect verified status updates.</p></div>`
       }
     </section>
   `;
@@ -730,12 +729,14 @@ export function renderCitizenPortal() {
         }
       </header>
 
-      <div class="no-print bg-[#1E3A8A] text-white border-b border-indigo-900 overflow-hidden">
-        <div class="max-w-[1440px] mx-auto px-4 sm:px-6 h-9 flex items-center gap-4">
-          <span class="text-xs font-semibold tracking-wide text-emerald-300 whitespace-nowrap shrink-0">${esc(copy.tickerLabel)}:</span>
-          <div class="overflow-hidden flex-1">
-            <div class="animate-ticker text-xs text-slate-100 flex items-center gap-12">
-              ${[...copy.notices, ...copy.notices].map((n) => `<span class="whitespace-nowrap">${esc(n)}</span>`).join('')}
+      <div class="no-print bg-[#1E3A8A] text-white text-xs">
+        <div class="max-w-[1440px] mx-auto px-4 sm:px-6 h-9 flex items-center gap-3 overflow-hidden">
+          <span class="px-2 py-0.5 bg-[#059669] text-white font-semibold rounded text-[11px] shrink-0">${esc(copy.tickerLabel)}</span>
+          <div class="overflow-hidden whitespace-nowrap flex-1">
+            <div class="ticker-track">
+              ${[...copy.notices, ...copy.notices]
+                .map((n) => `<span class="inline-flex items-center gap-6 pr-12 text-slate-100"><span>${esc(n)}</span><span class="text-emerald-300">•</span></span>`)
+                .join('')}
             </div>
           </div>
         </div>
@@ -743,8 +744,8 @@ export function renderCitizenPortal() {
 
       <main class="flex-1">${contentHtml}</main>
 
-      <footer class="no-print bg-white border-t border-slate-200 mt-auto">
-        <div class="max-w-[1440px] mx-auto px-4 sm:px-6 py-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 text-xs text-slate-500">
+      <footer class="no-print bg-white border-t border-slate-200 mt-12">
+        <div class="max-w-[1200px] mx-auto px-4 sm:px-6 py-8 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 text-xs text-slate-500">
           <div class="flex flex-wrap items-center gap-2">
             <span class="text-[#1E3A8A]">${ICONS.landmark('w-4 h-4')}</span>
             <span class="font-semibold text-slate-800">${esc(copy.brandName)}</span>
@@ -785,9 +786,13 @@ export function bindCitizenEvents(root) {
     });
   });
 
-  root.querySelectorAll('[data-track-id]').forEach((btn) => {
+  root.querySelectorAll('[data-prefill-track]').forEach((btn) => {
     btn.addEventListener('click', () => {
-      store.trackQuery = btn.getAttribute('data-track-id') || '';
+      store.trackQuery = btn.getAttribute('data-prefill-track') || '';
+      store.trackToken = '';
+      store.trackMobileLast4 = '';
+      store.trackedRecord = null;
+      store.trackError = '';
       store.citizenView = 'track';
       window.scrollTo({ top: 0, behavior: 'smooth' });
       notify();
@@ -809,6 +814,14 @@ export function bindCitizenEvents(root) {
   root.querySelector('#grv-photo-input')?.addEventListener('change', (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    if (file.size > 1_000_000) {
+      const errBox = root.querySelector('#grv-form-error');
+      if (errBox) {
+        errBox.textContent = 'Photo exceeds 1MB file limit.';
+        errBox.classList.remove('hidden');
+      }
+      return;
+    }
     const reader = new FileReader();
     reader.onload = () => {
       if (typeof reader.result === 'string') {
@@ -838,28 +851,56 @@ export function bindCitizenEvents(root) {
       }
       return;
     }
-    const created = await submitGrievance({
+    const res = await submitGrievance({
       citizenName,
       mobile,
       ward,
       category,
       landmark,
       description,
-      beforePhotoUrl: store.gPhotoPreview || undefined,
+      ...(store.gPhotoPreview ? { beforePhotoUrl: store.gPhotoPreview } : {}),
     });
-    if (created) {
+    if (res.ok && res.ticket) {
       store.gPhotoPreview = '';
-      store.submittedGrievance = created;
+      store.submittedGrievance = res.ticket;
+      store.submittedGrievanceToken = res.trackingToken;
       notify();
+    } else if (errBox) {
+      errBox.textContent = res.error || 'Submission failed.';
+      errBox.classList.remove('hidden');
     }
+  });
+
+  root.querySelector('#btn-track-submitted-grv')?.addEventListener('click', async () => {
+    if (!store.submittedGrievance) return;
+    store.citizenView = 'track';
+    await trackApplication(
+      store.submittedGrievance.id,
+      store.submittedGrievanceToken,
+      store.submittedGrievance.mobileLast4
+    );
+  });
+
+  root.querySelector('#btn-track-submitted-srv')?.addEventListener('click', async () => {
+    if (!store.submittedService) return;
+    store.citizenView = 'track';
+    await trackApplication(
+      store.submittedService.id,
+      store.submittedServiceToken,
+      store.submittedService.mobileLast4
+    );
   });
 
   root.querySelector('#btn-print-slip')?.addEventListener('click', () => window.print());
   root.querySelector('#btn-dl-grv-slip')?.addEventListener('click', () => {
-    if (store.submittedGrievance) downloadReceipt('grievance', store.submittedGrievance);
+    if (store.submittedGrievance) {
+      downloadReceipt('grievance', store.submittedGrievance, store.submittedGrievanceToken);
+    }
   });
   root.querySelector('#btn-dl-srv-slip')?.addEventListener('click', () => {
-    if (store.submittedService) downloadReceipt('service', store.submittedService);
+    if (store.submittedService) {
+      downloadReceipt('service', store.submittedService, store.submittedServiceToken);
+    }
   });
   root.querySelector('#btn-submit-another-grv')?.addEventListener('click', () => {
     store.submittedGrievance = null;
@@ -896,7 +937,7 @@ export function bindCitizenEvents(root) {
 
   root.querySelector('#srv-file-input')?.addEventListener('change', (e) => {
     const files = Array.from(e.target.files || []).map((f) => f.name);
-    store.serviceUploadedFiles = [...store.serviceUploadedFiles, ...files];
+    store.serviceUploadedFiles = [...store.serviceUploadedFiles, ...files].slice(0, 10);
     notify();
   });
 
@@ -924,7 +965,7 @@ export function bindCitizenEvents(root) {
       }
       return;
     }
-    const created = await submitServiceApplication({
+    const res = await submitServiceApplication({
       serviceId: store.selectedService.id,
       applicantName,
       mobile,
@@ -933,17 +974,23 @@ export function bindCitizenEvents(root) {
       checkedDocs: store.serviceCheckedDocs,
       uploadedDocNames: store.serviceUploadedFiles,
     });
-    if (created) {
-      store.submittedService = created;
+    if (res.ok && res.application) {
+      store.submittedService = res.application;
+      store.submittedServiceToken = res.trackingToken;
       notify();
+    } else if (errBox) {
+      errBox.textContent = res.error || 'Submission failed.';
+      errBox.classList.remove('hidden');
     }
   });
 
-  root.querySelector('#tracker-search-form')?.addEventListener('submit', (e) => {
+  root.querySelector('#tracker-search-form')?.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const input = root.querySelector('#tracker-input');
-    store.trackQuery = (input?.value || '').trim();
-    notify();
+    const fd = new FormData(e.target);
+    const tid = String(fd.get('trackingId') || '').trim().toUpperCase();
+    const token = String(fd.get('trackingToken') || '').trim();
+    const last4 = String(fd.get('mobileLast4') || '').replace(/\D/g, '');
+    await trackApplication(tid, token, last4);
   });
 
   root.querySelectorAll('[data-star]').forEach((btn) => {

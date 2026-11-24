@@ -1,0 +1,458 @@
+{
+  "entities": {
+    "PublicStats": {
+      "title": "PublicStats",
+      "description": "Anonymized Gram Panchayat public transparency counters and SLA threshold.",
+      "type": "object",
+      "properties": {
+        "resolvedCount": {
+          "type": "integer",
+          "description": "Total resolved civic grievances."
+        },
+        "avgDays": {
+          "type": "number",
+          "description": "Average grievance resolution time in days."
+        },
+        "activeServicesCount": {
+          "type": "integer",
+          "description": "Number of active online citizen e-services."
+        },
+        "avgRating": {
+          "type": "number",
+          "description": "Average citizen satisfaction score."
+        },
+        "slaLimitDays": {
+          "type": "integer",
+          "description": "Active SLA threshold in days."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 64
+        }
+      },
+      "required": ["resolvedCount", "avgDays", "activeServicesCount", "avgRating", "slaLimitDays", "updatedAt"]
+    },
+    "GrievanceSummary": {
+      "title": "GrievanceSummary",
+      "description": "Public-safe non-PII summary of civic grievance status across Panchayat wards.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ward": {
+          "type": "integer"
+        },
+        "category": {
+          "type": "string",
+          "enum": ["Water Supply", "Streetlights", "Waste Management", "Roads & Drainage", "Public Health", "Encroachment"],
+          "maxLength": 64
+        },
+        "department": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "status": {
+          "type": "string",
+          "enum": ["Pending", "In Progress", "Field Inspection", "Resolved", "Rejected"],
+          "maxLength": 40
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 64
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 64
+        }
+      },
+      "required": ["id", "ward", "category", "department", "status", "createdAt", "updatedAt"]
+    },
+    "GrievancePrivate": {
+      "title": "GrievancePrivate",
+      "description": "Full grievance record containing citizen PII and internal remarks, restricted to owner and authorized Panchayat staff.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "citizenName": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 120
+        },
+        "mobileLast4": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 4,
+          "pattern": "^[0-9]{4}$"
+        },
+        "ward": {
+          "type": "integer"
+        },
+        "category": {
+          "type": "string",
+          "enum": ["Water Supply", "Streetlights", "Waste Management", "Roads & Drainage", "Public Health", "Encroachment"],
+          "maxLength": 64
+        },
+        "department": {
+          "type": "string",
+          "enum": ["General Administration", "Roads & Streetlights", "Water & Sanitation", "Public Health", "Revenue & Certificates", "Building & Planning"],
+          "maxLength": 80
+        },
+        "landmark": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 200
+        },
+        "description": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 2000
+        },
+        "status": {
+          "type": "string",
+          "enum": ["Pending", "In Progress", "Field Inspection", "Resolved", "Rejected"],
+          "maxLength": 40
+        },
+        "assignedOfficerId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "publicRemark": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "internalRemark": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 64
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 64
+        }
+      },
+      "required": ["id", "ownerUid", "citizenName", "mobileLast4", "ward", "category", "department", "landmark", "description", "status", "createdAt", "updatedAt"]
+    },
+    "ServiceApplication": {
+      "title": "ServiceApplication",
+      "description": "Citizen statutory service & certificate application with strict PII and approval isolation.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "serviceId": {
+          "type": "string",
+          "enum": ["birth_death", "residence", "property_tax", "trade_license", "building_permit", "water_connection"],
+          "maxLength": 64
+        },
+        "serviceName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "applicantName": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 120
+        },
+        "mobileLast4": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 4,
+          "pattern": "^[0-9]{4}$"
+        },
+        "ward": {
+          "type": "integer"
+        },
+        "address": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 300
+        },
+        "department": {
+          "type": "string",
+          "enum": ["General Administration", "Roads & Streetlights", "Water & Sanitation", "Public Health", "Revenue & Certificates", "Building & Planning"],
+          "maxLength": 80
+        },
+        "feeInr": {
+          "type": "integer"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["Submitted", "Pending Verification", "Documents Verified", "Correction Needed", "Approved", "Rejected"],
+          "maxLength": 40
+        },
+        "officialRemark": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 64
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 64
+        }
+      },
+      "required": ["id", "ownerUid", "serviceId", "serviceName", "applicantName", "mobileLast4", "ward", "address", "department", "feeInr", "status", "createdAt", "updatedAt"]
+    },
+    "StaffDirectoryProfile": {
+      "title": "StaffDirectoryProfile",
+      "description": "Non-PII staff role, department, and ward jurisdiction document.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 120
+        },
+        "designation": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 120
+        },
+        "role": {
+          "type": "string",
+          "enum": ["SUPER_ADMIN", "WARD_OFFICER", "CSC_OPERATOR"],
+          "maxLength": 32
+        },
+        "department": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "isActive": {
+          "type": "boolean"
+        },
+        "canApproveCertificates": {
+          "type": "boolean"
+        },
+        "canAssignTickets": {
+          "type": "boolean"
+        },
+        "canManageUsers": {
+          "type": "boolean"
+        },
+        "canDeleteRecords": {
+          "type": "boolean"
+        },
+        "canVerifyDocuments": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 64
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 64
+        }
+      },
+      "required": ["uid", "name", "designation", "role", "department", "isActive", "canApproveCertificates", "canAssignTickets", "canManageUsers", "canDeleteRecords", "canVerifyDocuments", "createdAt", "updatedAt"]
+    },
+    "StaffPrivateInfo": {
+      "title": "StaffPrivateInfo",
+      "description": "Isolated PII (official email) for Panchayat staff, readable only by the staff owner or Super Admin.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 160
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 64
+        }
+      },
+      "required": ["uid", "email", "updatedAt"]
+    },
+    "AdminRecord": {
+      "title": "AdminRecord",
+      "description": "Trusted Super Admin registry document keyed by Firebase Auth UID.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "grantedAt": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 64
+        }
+      },
+      "required": ["uid", "grantedAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Append-only immutable audit log entry.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "actorUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "actorRole": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "action": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "targetId": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "details": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 64
+        }
+      },
+      "required": ["id", "actorUid", "actorRole", "action", "targetId", "details", "timestamp"]
+    },
+    "SecurityAlert": {
+      "title": "SecurityAlert",
+      "description": "Append-only security monitoring alert for lockouts and forbidden attempts.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"],
+          "maxLength": 16
+        },
+        "eventType": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "summary": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 64
+        }
+      },
+      "required": ["id", "severity", "eventType", "summary", "timestamp"]
+    },
+    "PortalConfig": {
+      "title": "PortalConfig",
+      "description": "Panchayat SLA policy configuration.",
+      "type": "object",
+      "properties": {
+        "slaLimitDays": {
+          "type": "integer"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 64
+        }
+      },
+      "required": ["slaLimitDays", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/public_stats/{statId}": {
+      "schema": { "$ref": "#/entities/PublicStats" },
+      "description": "Public anonymized transparency stats (no PII)."
+    },
+    "/grievance_summaries/{ticketId}": {
+      "schema": { "$ref": "#/entities/GrievanceSummary" },
+      "description": "Public-safe civic redressal feed without citizen PII."
+    },
+    "/grievances/{ticketId}": {
+      "schema": { "$ref": "#/entities/GrievancePrivate" },
+      "description": "Private grievance records isolated to owner and authorized Panchayat staff."
+    },
+    "/services/{appId}": {
+      "schema": { "$ref": "#/entities/ServiceApplication" },
+      "description": "Private e-service applications isolated to owner and authorized Panchayat staff."
+    },
+    "/staff_directory/{staffUid}": {
+      "schema": { "$ref": "#/entities/StaffDirectoryProfile" },
+      "description": "Non-PII staff role/ward permissions directory."
+    },
+    "/staff_directory/{staffUid}/private/{docId}": {
+      "schema": { "$ref": "#/entities/StaffPrivateInfo" },
+      "description": "Split private PII subcollection for staff email."
+    },
+    "/admins/{userId}": {
+      "schema": { "$ref": "#/entities/AdminRecord" },
+      "description": "Trusted Super Admin registry."
+    },
+    "/audit_logs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Append-only immutable audit log."
+    },
+    "/security_alerts/{alertId}": {
+      "schema": { "$ref": "#/entities/SecurityAlert" },
+      "description": "Append-only security event alerts."
+    },
+    "/config/{configId}": {
+      "schema": { "$ref": "#/entities/PortalConfig" },
+      "description": "Panchayat SLA policy config."
+    }
+  }
+}

@@ -1,0 +1,433 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 1 / Global Safety Net: Default-deny all paths
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isAdmin() {
+      return isVerifiedUser() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    function isActiveStaff() {
+      return isVerifiedUser()
+        && exists(/databases/$(database)/documents/staff_directory/$(request.auth.uid))
+        && get(/databases/$(database)/documents/staff_directory/$(request.auth.uid)).data.isActive == true;
+    }
+
+    function isValidDepartment(dept) {
+      return dept is string && dept.size() <= 80 && dept in [
+        'General Administration',
+        'Roads & Streetlights',
+        'Water & Sanitation',
+        'Public Health',
+        'Revenue & Certificates',
+        'Building & Planning'
+      ];
+    }
+
+    function isValidGrievanceCategory(cat) {
+      return cat is string && cat.size() <= 64 && cat in [
+        'Water Supply',
+        'Streetlights',
+        'Waste Management',
+        'Roads & Drainage',
+        'Public Health',
+        'Encroachment'
+      ];
+    }
+
+    function isValidGrievanceStatus(st) {
+      return st is string && st.size() <= 40 && st in [
+        'Pending',
+        'In Progress',
+        'Field Inspection',
+        'Resolved',
+        'Rejected'
+      ];
+    }
+
+    function isValidServiceId(sid) {
+      return sid is string && sid.size() <= 64 && sid in [
+        'birth_death',
+        'residence',
+        'property_tax',
+        'trade_license',
+        'building_permit',
+        'water_connection'
+      ];
+    }
+
+    function isValidServiceStatus(st) {
+      return st is string && st.size() <= 40 && st in [
+        'Submitted',
+        'Pending Verification',
+        'Documents Verified',
+        'Correction Needed',
+        'Approved',
+        'Rejected'
+      ];
+    }
+
+    function isValidPublicStats(data) {
+      return data.keys().hasAll(['resolvedCount', 'avgDays', 'activeServicesCount', 'avgRating', 'slaLimitDays', 'updatedAt'])
+        && data.keys().hasOnly(['resolvedCount', 'avgDays', 'activeServicesCount', 'avgRating', 'slaLimitDays', 'updatedAt'])
+        && data.resolvedCount is int && data.resolvedCount >= 0
+        && data.avgDays is number && data.avgDays >= 0
+        && data.activeServicesCount is int && data.activeServicesCount >= 0
+        && data.avgRating is number && data.avgRating >= 0 && data.avgRating <= 5
+        && data.slaLimitDays is int && data.slaLimitDays >= 1 && data.slaLimitDays <= 30
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidGrievanceSummary(data) {
+      return data.keys().hasAll(['id', 'ward', 'category', 'department', 'status', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'ward', 'category', 'department', 'status', 'createdAt', 'updatedAt'])
+        && isValidId(data.id)
+        && data.ward is int && data.ward >= 1 && data.ward <= 15
+        && isValidGrievanceCategory(data.category)
+        && isValidDepartment(data.department)
+        && isValidGrievanceStatus(data.status)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidGrievancePrivate(data) {
+      return data.keys().hasAll([
+          'id', 'ownerUid', 'citizenName', 'mobileLast4', 'ward',
+          'category', 'department', 'landmark', 'description', 'status',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerUid', 'citizenName', 'mobileLast4', 'ward',
+          'category', 'department', 'landmark', 'description', 'status',
+          'assignedOfficerId', 'publicRemark', 'internalRemark',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && isValidId(data.ownerUid)
+        && data.citizenName is string && data.citizenName.size() >= 2 && data.citizenName.size() <= 120
+        && data.mobileLast4 is string && data.mobileLast4.size() == 4 && data.mobileLast4.matches('^[0-9]{4}$')
+        && data.ward is int && data.ward >= 1 && data.ward <= 15
+        && isValidGrievanceCategory(data.category)
+        && isValidDepartment(data.department)
+        && data.landmark is string && data.landmark.size() >= 2 && data.landmark.size() <= 200
+        && data.description is string && data.description.size() >= 5 && data.description.size() <= 2000
+        && isValidGrievanceStatus(data.status)
+        && (!('assignedOfficerId' in data) || (data.assignedOfficerId is string && data.assignedOfficerId.size() <= 128))
+        && (!('publicRemark' in data) || (data.publicRemark is string && data.publicRemark.size() <= 1000))
+        && (!('internalRemark' in data) || (data.internalRemark is string && data.internalRemark.size() <= 1000))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidServiceApplication(data) {
+      return data.keys().hasAll([
+          'id', 'ownerUid', 'serviceId', 'serviceName', 'applicantName',
+          'mobileLast4', 'ward', 'address', 'department', 'feeInr',
+          'status', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerUid', 'serviceId', 'serviceName', 'applicantName',
+          'mobileLast4', 'ward', 'address', 'department', 'feeInr',
+          'status', 'officialRemark', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && isValidId(data.ownerUid)
+        && isValidServiceId(data.serviceId)
+        && data.serviceName is string && data.serviceName.size() >= 2 && data.serviceName.size() <= 120
+        && data.applicantName is string && data.applicantName.size() >= 2 && data.applicantName.size() <= 120
+        && data.mobileLast4 is string && data.mobileLast4.size() == 4 && data.mobileLast4.matches('^[0-9]{4}$')
+        && data.ward is int && data.ward >= 1 && data.ward <= 15
+        && data.address is string && data.address.size() >= 4 && data.address.size() <= 300
+        && isValidDepartment(data.department)
+        && data.feeInr is int && data.feeInr >= 0 && data.feeInr <= 100000
+        && isValidServiceStatus(data.status)
+        && (!('officialRemark' in data) || (data.officialRemark is string && data.officialRemark.size() <= 1000))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidStaffDirectoryProfile(data) {
+      return data.keys().hasAll([
+          'uid', 'name', 'designation', 'role', 'department',
+          'isActive', 'canApproveCertificates', 'canAssignTickets',
+          'canManageUsers', 'canDeleteRecords', 'canVerifyDocuments',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'name', 'designation', 'role', 'department',
+          'isActive', 'canApproveCertificates', 'canAssignTickets',
+          'canManageUsers', 'canDeleteRecords', 'canVerifyDocuments',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.uid)
+        && data.name is string && data.name.size() >= 2 && data.name.size() <= 120
+        && data.designation is string && data.designation.size() >= 2 && data.designation.size() <= 120
+        && data.role is string && data.role.size() <= 32 && data.role in ['SUPER_ADMIN', 'WARD_OFFICER', 'CSC_OPERATOR']
+        && isValidDepartment(data.department)
+        && data.isActive is bool
+        && data.canApproveCertificates is bool
+        && data.canAssignTickets is bool
+        && data.canManageUsers is bool
+        && data.canDeleteRecords is bool
+        && data.canVerifyDocuments is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidStaffPrivateInfo(data) {
+      return data.keys().hasAll(['uid', 'email', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'updatedAt'])
+        && isValidId(data.uid)
+        && data.email is string && data.email.size() >= 5 && data.email.size() <= 160
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAdminRecord(data) {
+      return data.keys().hasAll(['uid', 'grantedAt'])
+        && data.keys().hasOnly(['uid', 'grantedAt'])
+        && isValidId(data.uid)
+        && data.grantedAt is timestamp;
+    }
+
+    function isValidAuditLog(data) {
+      return data.keys().hasAll(['id', 'actorUid', 'actorRole', 'action', 'targetId', 'details', 'timestamp'])
+        && data.keys().hasOnly(['id', 'actorUid', 'actorRole', 'action', 'targetId', 'details', 'timestamp'])
+        && isValidId(data.id)
+        && isValidId(data.actorUid)
+        && data.actorRole is string && data.actorRole.size() >= 2 && data.actorRole.size() <= 32
+        && data.action is string && data.action.size() >= 2 && data.action.size() <= 64
+        && data.targetId is string && data.targetId.size() >= 1 && data.targetId.size() <= 64
+        && data.details is string && data.details.size() >= 2 && data.details.size() <= 500
+        && data.timestamp is timestamp;
+    }
+
+    function isValidSecurityAlert(data) {
+      return data.keys().hasAll(['id', 'severity', 'eventType', 'summary', 'timestamp'])
+        && data.keys().hasOnly(['id', 'severity', 'eventType', 'summary', 'timestamp'])
+        && isValidId(data.id)
+        && data.severity is string && data.severity.size() <= 16 && data.severity in ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']
+        && data.eventType is string && data.eventType.size() >= 2 && data.eventType.size() <= 64
+        && data.summary is string && data.summary.size() >= 2 && data.summary.size() <= 300
+        && data.timestamp is timestamp;
+    }
+
+    function isValidPortalConfig(data) {
+      return data.keys().hasAll(['slaLimitDays', 'updatedAt'])
+        && data.keys().hasOnly(['slaLimitDays', 'updatedAt'])
+        && data.slaLimitDays is int && data.slaLimitDays >= 1 && data.slaLimitDays <= 30
+        && data.updatedAt is timestamp;
+    }
+
+    // Non-PII public stats: readable only as single doc 'overview', writable only by Super Admin
+    match /public_stats/{statId} {
+      allow get: if isValidId(statId) && statId == 'overview';
+      allow list: if false;
+      allow create, update: if isAdmin()
+        && isValidId(statId)
+        && isValidPublicStats(incoming())
+        && incoming().updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    // Non-PII grievance summaries: readable when signed in for authenticated dashboard or specific resolved record
+    match /grievance_summaries/{ticketId} {
+      allow get: if isValidId(ticketId) && (isSignedIn() || existing().status == 'Resolved');
+      allow list: if isSignedIn() && resource.data.ward >= 1 && resource.data.ward <= 15;
+      allow create: if isVerifiedUser()
+        && isValidId(ticketId)
+        && isValidGrievanceSummary(incoming())
+        && incoming().id == ticketId
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && existsAfter(/databases/$(database)/documents/grievances/$(ticketId));
+      allow update: if isVerifiedUser()
+        && isValidId(ticketId)
+        && isValidGrievanceSummary(incoming())
+        && incoming().id == existing().id
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (isAdmin() || isActiveStaff())
+        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'department', 'updatedAt']);
+      allow delete: if isAdmin() && isValidId(ticketId);
+    }
+
+    // Private grievances: strict ownerUid or active staff/admin isolation
+    match /grievances/{ticketId} {
+      allow get: if isValidId(ticketId) && isVerifiedUser()
+        && (existing().ownerUid == request.auth.uid || isAdmin() || isActiveStaff());
+      allow list: if isVerifiedUser() && resource.data.ownerUid == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidId(ticketId)
+        && isValidGrievancePrivate(incoming())
+        && incoming().id == ticketId
+        && incoming().ownerUid == request.auth.uid
+        && incoming().status == 'Pending'
+        && !('internalRemark' in incoming())
+        && !('assignedOfficerId' in incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser()
+        && isValidId(ticketId)
+        && isValidGrievancePrivate(incoming())
+        && incoming().id == existing().id
+        && incoming().ownerUid == existing().ownerUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (
+            isActiveStaff()
+            && !(existing().status in ['Resolved', 'Rejected'])
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'publicRemark', 'internalRemark', 'assignedOfficerId', 'updatedAt'])
+          )
+        );
+      allow delete: if isAdmin() && isValidId(ticketId);
+    }
+
+    // Service applications: strict ownerUid or active staff/admin isolation + certificate approval gate
+    match /services/{appId} {
+      allow get: if isValidId(appId) && isVerifiedUser()
+        && (existing().ownerUid == request.auth.uid || isAdmin() || isActiveStaff());
+      allow list: if isVerifiedUser() && resource.data.ownerUid == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidId(appId)
+        && isValidServiceApplication(incoming())
+        && incoming().id == appId
+        && incoming().ownerUid == request.auth.uid
+        && incoming().status == 'Submitted'
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser()
+        && isValidId(appId)
+        && isValidServiceApplication(incoming())
+        && incoming().id == existing().id
+        && incoming().ownerUid == existing().ownerUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (
+            isActiveStaff()
+            && !(existing().status in ['Approved', 'Rejected'])
+            && (
+              incoming().status != 'Approved'
+              || get(/databases/$(database)/documents/staff_directory/$(request.auth.uid)).data.canApproveCertificates == true
+            )
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'officialRemark', 'updatedAt'])
+          )
+        );
+      allow delete: if isAdmin() && isValidId(appId);
+    }
+
+    // Staff directory (non-PII): strictly owner or admin read, only Super Admin can create/update
+    match /staff_directory/{staffUid} {
+      allow get: if isValidId(staffUid) && isVerifiedUser()
+        && (request.auth.uid == staffUid || isAdmin());
+      allow list: if isVerifiedUser() && resource.data.uid == request.auth.uid;
+      allow create: if isAdmin()
+        && isValidId(staffUid)
+        && isValidStaffDirectoryProfile(incoming())
+        && incoming().uid == staffUid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidId(staffUid)
+        && isValidStaffDirectoryProfile(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'name', 'designation', 'role', 'department', 'isActive',
+          'canApproveCertificates', 'canAssignTickets', 'canManageUsers',
+          'canDeleteRecords', 'canVerifyDocuments', 'updatedAt'
+        ]);
+      allow delete: if false;
+
+      // Split private PII subcollection (email)
+      match /private/{docId} {
+        allow get: if isValidId(staffUid) && isValidId(docId) && isVerifiedUser()
+          && (request.auth.uid == staffUid || isAdmin());
+        allow list: if false;
+        allow create, update: if isValidId(staffUid) && isValidId(docId)
+          && isAdmin()
+          && isValidStaffPrivateInfo(incoming())
+          && incoming().uid == staffUid
+          && incoming().updatedAt == request.time;
+        allow delete: if false;
+      }
+    }
+
+    // Trusted Admin registry: read-only to self or admin, write locked to existing admins
+    match /admins/{userId} {
+      allow get: if isValidId(userId) && isVerifiedUser() && (request.auth.uid == userId || isAdmin());
+      allow list: if false;
+      allow create: if isAdmin()
+        && isValidId(userId)
+        && isValidAdminRecord(incoming())
+        && incoming().uid == userId
+        && incoming().grantedAt == request.time;
+      allow update, delete: if false;
+    }
+
+    // Append-only immutable audit logs
+    match /audit_logs/{logId} {
+      allow get: if isValidId(logId) && isAdmin();
+      allow list: if isVerifiedUser() && resource.data.actorUid == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidId(logId)
+        && isValidAuditLog(incoming())
+        && incoming().id == logId
+        && incoming().actorUid == request.auth.uid
+        && incoming().timestamp == request.time
+        && (isAdmin() || isActiveStaff());
+      allow update, delete: if false;
+    }
+
+    // Append-only security alerts
+    match /security_alerts/{alertId} {
+      allow get: if isValidId(alertId) && isAdmin();
+      allow list: if false;
+      allow create: if isAdmin()
+        && isValidId(alertId)
+        && isValidSecurityAlert(incoming())
+        && incoming().id == alertId
+        && incoming().timestamp == request.time;
+      allow update, delete: if false;
+    }
+
+    // SLA Configuration
+    match /config/{configId} {
+      allow get: if isValidId(configId) && configId == 'sla' && isVerifiedUser();
+      allow list: if false;
+      allow create, update: if isAdmin()
+        && isValidId(configId)
+        && configId == 'sla'
+        && isValidPortalConfig(incoming())
+        && incoming().updatedAt == request.time;
+      allow delete: if false;
+    }
+  }
+}

@@ -53,44 +53,51 @@ export function formatDateTime(iso) {
   });
 }
 
-export function downloadReceipt(kind, data) {
+export function downloadReceipt(kind, data, trackingToken = '') {
+  const mobileDisplay = data.mobileLast4
+    ? `******${data.mobileLast4}`
+    : data.mobile
+      ? `******${String(data.mobile).slice(-4)}`
+      : 'Verified';
+
   const lines =
     kind === 'grievance'
       ? [
           'ABC GRAM PANCHAYAT — OFFICIAL GRIEVANCE ACKNOWLEDGEMENT',
           '=======================================================',
-          `Tracking ID      : ${data.id}`,
-          `Citizen Name     : ${data.citizenName}`,
-          `Mobile Number    : ${data.mobile}`,
-          `Ward             : Ward ${data.ward}`,
-          `Category         : ${data.category}`,
-          `Department       : ${data.department}`,
-          `Landmark         : ${data.landmark}`,
-          `Current Status   : ${data.status}`,
-          `Filed Timestamp  : ${formatDateTime(data.createdAt)}`,
+          `Tracking ID        : ${data.id}`,
+          `Verification Token : ${trackingToken || 'Issued at submission'}`,
+          `Citizen Name       : ${data.citizenName || data.citizenDisplay || 'Citizen'}`,
+          `Registered Mobile  : ${mobileDisplay}`,
+          `Ward               : Ward ${data.ward}`,
+          `Category           : ${data.category}`,
+          `Department         : ${data.department}`,
+          `Landmark           : ${data.landmark}`,
+          `Current Status     : ${data.status}`,
+          `Filed Timestamp    : ${formatDateTime(data.createdAt)}`,
           '',
           'Description:',
           data.description,
           '',
-          'Track live status online at the ABC Gram Panchayat Citizen Portal.',
+          'Keep both your Tracking ID and Verification Token to track live status online.',
         ]
       : [
           'ABC GRAM PANCHAYAT — E-SERVICE APPLICATION ACKNOWLEDGEMENT',
           '===========================================================',
-          `Tracking ID      : ${data.id}`,
-          `Service Name     : ${data.serviceName}`,
-          `Applicant Name   : ${data.applicantName}`,
-          `Mobile Number    : ${data.mobile}`,
-          `Ward             : Ward ${data.ward}`,
-          `Address          : ${data.address}`,
-          `Statutory Fee    : ${data.feeInr === 0 ? 'Free of Cost' : `INR ${data.feeInr}`}`,
-          `Current Status   : ${data.status}`,
-          `Filed Timestamp  : ${formatDateTime(data.createdAt)}`,
+          `Tracking ID        : ${data.id}`,
+          `Verification Token : ${trackingToken || 'Issued at submission'}`,
+          `Service Name       : ${data.serviceName}`,
+          `Applicant Name     : ${data.applicantName || data.applicantDisplay || 'Applicant'}`,
+          `Registered Mobile  : ${mobileDisplay}`,
+          `Ward               : Ward ${data.ward}`,
+          `Statutory Fee      : ${data.feeInr === 0 ? 'Free of Cost' : `INR ${data.feeInr}`}`,
+          `Current Status     : ${data.status}`,
+          `Filed Timestamp    : ${formatDateTime(data.createdAt)}`,
           '',
-          `Verified Checklist Items (${data.checkedDocs.length}):`,
-          ...data.checkedDocs.map((doc, idx) => `  ${idx + 1}. ${doc}`),
+          `Verified Checklist Items (${(data.checkedDocs || []).length}):`,
+          ...(data.checkedDocs || []).map((doc, idx) => `  ${idx + 1}. ${doc}`),
           '',
-          'Track live status online at the ABC Gram Panchayat Citizen Portal.',
+          'Keep both your Tracking ID and Verification Token to track live status online.',
         ];
 
   const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' });

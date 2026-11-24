@@ -1,9 +1,11 @@
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 /*
- * ABC Gram Panchayat — Native C SLA & RBAC Rule Engine
+ * ABC Gram Panchayat — Hardened Native C SLA & RBAC Rule Engine
  * Compiled with GCC and invoked by the Python 3 backend.
  *
  * Role codes:
@@ -31,18 +33,33 @@
 #define PERM_DELETE_RECORDS 8
 #define PERM_VERIFY_DOCS 16
 
+static int parse_strict_int(const char *s, int min_val, int max_val, int *out) {
+    if (!s || *s == '\0') return 0;
+    char *end = NULL;
+    errno = 0;
+    long v = strtol(s, &end, 10);
+    if (errno != 0 || end == s || *end != '\0') return 0;
+    if (v < min_val || v > max_val) return 0;
+    *out = (int)v;
+    return 1;
+}
+
 static int handle_sla(int argc, char *argv[]) {
     if (argc < 5) {
         fprintf(stderr, "Usage: sla_rbac sla <age_days> <sla_limit_days> <is_closed>\n");
         return 1;
     }
 
-    int age_days = atoi(argv[2]);
-    int sla_limit = atoi(argv[3]);
-    int is_closed = atoi(argv[4]);
+    int age_days = 0;
+    int sla_limit = 7;
+    int is_closed = 0;
 
-    if (age_days < 0) age_days = 0;
-    if (sla_limit < 1) sla_limit = 7;
+    if (!parse_strict_int(argv[2], 0, 36500, &age_days) ||
+        !parse_strict_int(argv[3], 1, 30, &sla_limit) ||
+        !parse_strict_int(argv[4], 0, 1, &is_closed)) {
+        fprintf(stderr, "Invalid SLA parameters\n");
+        return 1;
+    }
 
     int remaining = sla_limit - age_days;
     int is_breached = (!is_closed && age_days > sla_limit) ? 1 : 0;
@@ -73,13 +90,22 @@ static int handle_rbac(int argc, char *argv[]) {
         return 1;
     }
 
-    int role = atoi(argv[2]);
-    int perm_mask = atoi(argv[3]);
-    int ward_mask = atoi(argv[4]);
-    int target_ward = atoi(argv[5]);
-    int same_dept = atoi(argv[6]);
-    const char *action = argv[7];
+    int role = 0;
+    int perm_mask = 0;
+    int ward_mask = 0;
+    int target_ward = 0;
+    int same_dept = 0;
 
+    if (!parse_strict_int(argv[2], 0, 3, &role) ||
+        !parse_strict_int(argv[3], 0, 31, &perm_mask) ||
+        !parse_strict_int(argv[4], 0, 32767, &ward_mask) ||
+        !parse_strict_int(argv[5], 1, 15, &target_ward) ||
+        !parse_strict_int(argv[6], 0, 1, &same_dept)) {
+        printf("{\"allowed\":false,\"reason\":\"Invalid RBAC parameters rejected.\"}\n");
+        return 0;
+    }
+
+    const char *action = argv[7];
     int allowed = 0;
     const char *reason = "Access denied by Panchayat RBAC policy.";
 
@@ -88,7 +114,7 @@ static int handle_rbac(int argc, char *argv[]) {
         return 0;
     }
 
-    int ward_bit = (target_ward >= 1 && target_ward <= 15) ? (1 << (target_ward - 1)) : 0;
+    int ward_bit = 1 << (target_ward - 1);
     int in_ward = (role == ROLE_SUPER_ADMIN || role == ROLE_CSC_OPERATOR) ? 1 : ((ward_mask & ward_bit) != 0);
 
     if (strcmp(action, "VIEW") == 0) {
@@ -101,10 +127,20 @@ static int handle_rbac(int argc, char *argv[]) {
         } else {
             reason = "Outside assigned ward or department scope.";
         }
-    } else if (strcmp(action, "UPDATE") == 0) {
+    } else if (strcmp(action, "CREATE_WALKIN") == 0) {
         if (role == ROLE_SUPER_ADMIN || role == ROLE_CSC_OPERATOR) {
             allowed = 1;
+            reason = "Authorized for walk-in intake.";
+        } else {
+            reason = "Walk-in intake restricted to CSC Operator or Panchayat Secretary.";
+        }
+    } else if (strcmp(action, "UPDATE") == 0) {
+        if (role == ROLE_SUPER_ADMIN) {
+            allowed = 1;
             reason = "Authorized to update record.";
+        } else if (role == ROLE_CSC_OPERATOR) {
+            allowed = 1;
+            reason = "CSC desk update authorized for intake/verification.";
         } else if (role == ROLE_WARD_OFFICER && in_ward && same_dept) {
             allowed = 1;
             reason = "Ward officer update permitted within jurisdiction.";
@@ -112,40 +148,52 @@ static int handle_rbac(int argc, char *argv[]) {
             reason = "Cannot modify ticket outside assigned ward/department.";
         }
     } else if (strcmp(action, "ASSIGN") == 0) {
-        if (role == ROLE_SUPER_ADMIN || (perm_mask & PERM_ASSIGN_TICKET)) {
+        if (role == ROLE_SUPER_ADMIN || ((perm_mask & PERM_ASSIGN_TICKET) && in_ward && same_dept)) {
             allowed = 1;
             reason = "Ticket assignment permission verified.";
         } else {
             reason = "Permission denied: Assign Tickets authority required.";
         }
     } else if (strcmp(action, "VERIFY") == 0) {
-        if (role == ROLE_SUPER_ADMIN || (perm_mask & PERM_VERIFY_DOCS)) {
+        if (role == ROLE_SUPER_ADMIN || ((perm_mask & PERM_VERIFY_DOCS) && (role == ROLE_CSC_OPERATOR || (in_ward && same_dept)))) {
             allowed = 1;
             reason = "Document verification permission verified.";
         } else {
             reason = "Permission denied: Verify Documents authority required.";
         }
     } else if (strcmp(action, "APPROVE_CERT") == 0) {
-        if (perm_mask & PERM_APPROVE_CERT) {
+        if (role == ROLE_SUPER_ADMIN && (perm_mask & PERM_APPROVE_CERT)) {
             allowed = 1;
             reason = "Certificate approval authority verified.";
+        } else if ((perm_mask & PERM_APPROVE_CERT) && in_ward && same_dept) {
+            allowed = 1;
+            reason = "Delegated certificate approval verified within jurisdiction.";
         } else {
             reason = "Permission denied: Approve Certificates authority required.";
         }
     } else if (strcmp(action, "MANAGE_USERS") == 0) {
-        if (perm_mask & PERM_MANAGE_USERS) {
+        if (role == ROLE_SUPER_ADMIN && (perm_mask & PERM_MANAGE_USERS)) {
             allowed = 1;
             reason = "User and RBAC management authority verified.";
         } else {
             reason = "Permission denied: Manage Users authority required.";
         }
     } else if (strcmp(action, "DELETE") == 0) {
-        if (perm_mask & PERM_DELETE_RECORDS) {
+        if (role == ROLE_SUPER_ADMIN && (perm_mask & PERM_DELETE_RECORDS)) {
             allowed = 1;
             reason = "Record deletion authority verified.";
         } else {
             reason = "Permission denied: Delete Records authority required.";
         }
+    } else if (strcmp(action, "MANAGE_SLA") == 0 || strcmp(action, "MAINTENANCE_RESET") == 0) {
+        if (role == ROLE_SUPER_ADMIN) {
+            allowed = 1;
+            reason = "Super Admin administrative action verified.";
+        } else {
+            reason = "Permission denied: Super Admin authority required.";
+        }
+    } else {
+        reason = "Unknown RBAC action denied.";
     }
 
     printf("{\"allowed\":%s,\"reason\":\"%s\"}\n", allowed ? "true" : "false", reason);
