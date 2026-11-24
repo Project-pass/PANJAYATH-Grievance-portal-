@@ -1,7 +1,7 @@
 /**
  * Firestore Security Rules Verification Matrix ("Dirty Dozen" + Positive Flows)
- * Note: Project uses pure JS frontend; this verification spec documents the rules unit test cases
- * executed against DRAFT_firestore.rules and firestore.rules via ESLint & rule-logic assertions.
+ * Executable emulator tests live in `firestore.rules.test.mjs` (`npm run test:firestore`
+ * via `firebase emulators:exec --only firestore`). This file retains the structured matrix.
  */
 
 export const DIRTY_DOZEN_CASES = [

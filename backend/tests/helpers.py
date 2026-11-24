@@ -29,18 +29,22 @@ class IsolatedServerTestCase(unittest.TestCase):
         cls.tmpdir = tempfile.TemporaryDirectory()
         cls.test_db_path = os.path.join(cls.tmpdir.name, "test_panchayat.db")
         cls.test_audit_path = os.path.join(cls.tmpdir.name, "test_audit.jsonl")
+        cls.test_checkpoints_path = os.path.join(cls.tmpdir.name, "test_audit_checkpoints.jsonl")
         cls.test_backup_dir = os.path.join(cls.tmpdir.name, "backups")
 
         cls._orig_db_sqlite = db.SQLITE_PATH
         cls._orig_db_audit = db.AUDIT_JSONL_PATH
+        cls._orig_db_checkpoints = db.AUDIT_CHECKPOINTS_PATH
         cls._orig_srv_sqlite = server.SQLITE_PATH
         cls._orig_maint_sqlite = maintenance.SQLITE_PATH
         cls._orig_maint_backup = maintenance.BACKUP_DIR
         cls._orig_env_pass = os.environ.pop("PANCHAYAT_SECRETARY_PASSCODE", None)
+        cls._orig_db_url = os.environ.pop("DATABASE_URL", None)
         cls._orig_sec_cache = security_utils._SESSION_SECRET_CACHE
 
         db.SQLITE_PATH = cls.test_db_path
         db.AUDIT_JSONL_PATH = cls.test_audit_path
+        db.AUDIT_CHECKPOINTS_PATH = cls.test_checkpoints_path
         server.SQLITE_PATH = cls.test_db_path
         maintenance.SQLITE_PATH = cls.test_db_path
         maintenance.BACKUP_DIR = cls.test_backup_dir
@@ -59,12 +63,15 @@ class IsolatedServerTestCase(unittest.TestCase):
         cls.httpd.server_close()
         db.SQLITE_PATH = cls._orig_db_sqlite
         db.AUDIT_JSONL_PATH = cls._orig_db_audit
+        db.AUDIT_CHECKPOINTS_PATH = cls._orig_db_checkpoints
         server.SQLITE_PATH = cls._orig_srv_sqlite
         maintenance.SQLITE_PATH = cls._orig_maint_sqlite
         maintenance.BACKUP_DIR = cls._orig_maint_backup
         security_utils._SESSION_SECRET_CACHE = cls._orig_sec_cache
         if cls._orig_env_pass is not None:
             os.environ["PANCHAYAT_SECRETARY_PASSCODE"] = cls._orig_env_pass
+        if cls._orig_db_url is not None:
+            os.environ["DATABASE_URL"] = cls._orig_db_url
         cls.tmpdir.cleanup()
 
     def request(

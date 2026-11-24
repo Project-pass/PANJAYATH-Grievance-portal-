@@ -1,38 +1,56 @@
 services:
-  api:
+  proxy:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.web
     ports:
-      - "3001:3001"
-    environment:
-      APP_ENV: ${APP_ENV:-production}
-      PANCHAYAT_SESSION_SECRET: ${PANCHAYAT_SESSION_SECRET:?PANCHAYAT_SESSION_SECRET must be set (>= 32 chars)}
-      PANCHAYAT_SECRETARY_PASSCODE: ${PANCHAYAT_SECRETARY_PASSCODE:-}
-      PANCHAYAT_ALLOWED_ORIGINS: ${PANCHAYAT_ALLOWED_ORIGINS:-http://localhost:3000}
-      PANCHAYAT_LOG_LEVEL: ${PANCHAYAT_LOG_LEVEL:-INFO}
-      DATABASE_URL: ${DATABASE_URL:-sqlite:////app/backend/data/panchayat.db}
-    volumes:
-      - panchayat_data:/app/backend/data
-      - panchayat_backups:/app/backend/backups
+      - "${WEB_PORT:-3000}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3001/api/ready', timeout=3)"]
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/healthz"]
       interval: 30s
       timeout: 5s
       retries: 3
 
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    expose:
+      - "3001"
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      PANCHAYAT_SESSION_SECRET: ${PANCHAYAT_SESSION_SECRET:-dev-compose-only-change-before-production-32chars}
+      PANCHAYAT_AUDIT_HMAC_KEY: ${PANCHAYAT_AUDIT_HMAC_KEY:-dev-audit-hmac-key-change-before-production-32chars}
+      PANCHAYAT_ALLOWED_ORIGINS: ${PANCHAYAT_ALLOWED_ORIGINS:-http://localhost:3000}
+      PANCHAYAT_LOG_LEVEL: ${PANCHAYAT_LOG_LEVEL:-INFO}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://panchayat:${POSTGRES_PASSWORD:-local_dev_pg_only}@postgres:5432/panchayat}
+    volumes:
+      - panchayat_data:/app/backend/data
+      - panchayat_backups:/app/backend/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3001/api/ready', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
   postgres:
     image: postgres:16-alpine
-    profiles: ["postgres"]
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-panchayat}
       POSTGRES_USER: ${POSTGRES_USER:-panchayat}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_in_env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local_dev_pg_only}
     volumes:
       - panchayat_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-panchayat}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-panchayat} -d ${POSTGRES_DB:-panchayat}"]
       interval: 10s
       timeout: 5s
       retries: 5

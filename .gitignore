@@ -30,3 +30,9 @@ backend/backups/
 *.pem
 *.key
 .session_secret
+
+# Playwright artifacts
+test-results/
+playwright-report/
+.playwright/
+

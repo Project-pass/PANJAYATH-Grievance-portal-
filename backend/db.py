@@ -5,13 +5,24 @@ from datetime import datetime, timezone
 import json
 import os
 import sqlite3
-import threading
 import time
 import uuid
 
 from app.core.config import DATA_DIR as CFG_DATA_DIR, load_settings
 from app.core.logging import get_request_id
+from app.database.connection import get_adapter, get_db_connection, resolve_database_url
+from app.database.interface import DbConnection, detect_database_backend
+from app.database.migrations.runner import run_alembic_upgrade
+from app.database.sqlite_adapter import SQLITE_WRITE_LOCK
+from app.database.transactions import run_transaction
 from app.policies.rbac import normalize_grievance_status
+from app.services.audit_integrity import (
+    DEFAULT_CHECKPOINTS_PATH,
+    append_checkpoint_record,
+    backfill_audit_hash_chain,
+    compute_event_hash,
+    resolve_audit_hmac_key,
+)
 from app.services.sla import DEFAULT_CATEGORY_SLA_DAYS, resolve_effective_sla_limit
 from security_utils import generate_tracking_token, hash_passcode, hash_token
 from seed_data import CATEGORY_DEPARTMENT_MAP, get_initial_state
@@ -22,36 +33,23 @@ _SETTINGS = load_settings()
 SQLITE_PATH = str(_SETTINGS.sqlite_path)
 LEGACY_JSON_PATH = os.path.join(DATA_DIR, "portal_db.json")
 AUDIT_JSONL_PATH = str(_SETTINGS.audit_jsonl_path)
+AUDIT_CHECKPOINTS_PATH = DEFAULT_CHECKPOINTS_PATH
 
-DB_WRITE_LOCK = threading.Lock()
+DB_WRITE_LOCK = SQLITE_WRITE_LOCK
 
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def get_connection(db_path: str = SQLITE_PATH) -> sqlite3.Connection:
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    conn = sqlite3.connect(db_path, timeout=15.0, isolation_level=None, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON;")
-    conn.execute("PRAGMA journal_mode = WAL;")
-    conn.execute("PRAGMA synchronous = NORMAL;")
-    return conn
+def get_connection(db_path: str | None = None) -> DbConnection:
+    return get_db_connection(db_path or SQLITE_PATH)
 
 
 @contextmanager
-def transaction(conn: sqlite3.Connection):
-    with DB_WRITE_LOCK:
-        conn.execute("BEGIN IMMEDIATE;")
-        try:
-            yield conn
-            if conn.in_transaction:
-                conn.execute("COMMIT;")
-        except Exception:
-            if conn.in_transaction:
-                conn.execute("ROLLBACK;")
-            raise
+def transaction(conn: DbConnection | sqlite3.Connection):
+    with run_transaction(conn) as tx_conn:
+        yield tx_conn
 
 
 V3_GRIEVANCES_DDL = """
@@ -325,13 +323,28 @@ MIGRATIONS = [
         CREATE INDEX IF NOT EXISTS idx_notifications_target ON notifications(target_id, created_at DESC);
         """,
     ),
+    (
+        4,
+        """
+        CREATE TABLE IF NOT EXISTS audit_checkpoints (
+            checkpoint_id TEXT PRIMARY KEY,
+            seq_no INTEGER NOT NULL,
+            event_id TEXT NOT NULL,
+            event_hash TEXT NOT NULL,
+            record_count INTEGER NOT NULL,
+            signature TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_seq_no ON audit_logs(seq_no);
+        """,
+    ),
 ]
 
 
-def _seed_reference_tables(conn: sqlite3.Connection):
+def _seed_reference_tables(conn: DbConnection):
     for w in range(1, 16):
         conn.execute(
-            "INSERT OR IGNORE INTO wards(ward_number, name) VALUES (?, ?)",
+            "INSERT INTO wards(ward_number, name) VALUES (?, ?) ON CONFLICT DO NOTHING",
             (w, f"Ward {w}"),
         )
 
@@ -345,20 +358,20 @@ def _seed_reference_tables(conn: sqlite3.Connection):
     ]
     for name, head in depts:
         conn.execute(
-            "INSERT OR IGNORE INTO departments(name, head_designation) VALUES (?, ?)",
+            "INSERT INTO departments(name, head_designation) VALUES (?, ?) ON CONFLICT DO NOTHING",
             (name, head),
         )
 
     for cat, days in DEFAULT_CATEGORY_SLA_DAYS.items():
         dept = CATEGORY_DEPARTMENT_MAP.get(cat, "General Administration")
         conn.execute(
-            "INSERT OR IGNORE INTO grievance_categories(name, department, default_sla_days) VALUES (?, ?, ?)",
+            "INSERT INTO grievance_categories(name, department, default_sla_days) VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
             (cat, dept, days),
         )
         for pr in ("LOW", "NORMAL", "HIGH", "CRITICAL"):
             eff = resolve_effective_sla_limit(cat, pr, days)
             conn.execute(
-                "INSERT OR IGNORE INTO sla_policies(category, priority, deadline_days) VALUES (?, ?, ?)",
+                "INSERT INTO sla_policies(category, priority, deadline_days) VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
                 (cat, pr, eff),
             )
 
@@ -369,12 +382,12 @@ def _seed_reference_tables(conn: sqlite3.Connection):
         ("2026-12-25", "Christmas Day"),
     ):
         conn.execute(
-            "INSERT OR IGNORE INTO holidays(holiday_date, label) VALUES (?, ?)",
+            "INSERT INTO holidays(holiday_date, label) VALUES (?, ?) ON CONFLICT DO NOTHING",
             (hdate, label),
         )
 
 
-def _apply_v3_table_upgrades(conn: sqlite3.Connection):
+def _apply_v3_table_upgrades(conn: DbConnection):
     staff_cols = {r["name"] for r in conn.execute("PRAGMA table_info(staff)").fetchall()}
     if "external_uuid" not in staff_cols:
         conn.execute("ALTER TABLE staff ADD COLUMN external_uuid TEXT;")
@@ -394,7 +407,6 @@ def _apply_v3_table_upgrades(conn: sqlite3.Connection):
 
     grv_cols = {r["name"] for r in conn.execute("PRAGMA table_info(grievances)").fetchall()}
     if "external_uuid" not in grv_cols:
-        # Rebuild grievances cleanly with canonical CHECK statuses & new SLA/workflow columns
         conn.execute("PRAGMA foreign_keys = OFF;")
         conn.execute("DROP TABLE IF EXISTS grievances_v3;")
         conn.execute(V3_GRIEVANCES_DDL.replace("CREATE TABLE IF NOT EXISTS grievances", "CREATE TABLE grievances_v3"))
@@ -411,7 +423,7 @@ def _apply_v3_table_upgrades(conn: sqlite3.Connection):
                     created_at, updated_at, resolved_at, assigned_officer_id, assigned_officer_name,
                     filed_by_role, before_photo_url, after_photo_url, public_remark, internal_remark,
                     rating, feedback_comment, timeline_json, tracking_token_hash
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'NORMAL', ?, 0, NULL, NULL, 0, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'NORMAL', ?, 0, NULL, NULL, 0, TRUE, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     r["id"],
@@ -446,18 +458,42 @@ def _apply_v3_table_upgrades(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE grievances_v3 RENAME TO grievances;")
         conn.execute("PRAGMA foreign_keys = ON;")
 
-    # Backfill UUIDs for any remaining rows
     for tbl in ("staff", "grievances", "services"):
         missing = conn.execute(f"SELECT id FROM {tbl} WHERE external_uuid IS NULL OR external_uuid = ''").fetchall()
         for row in missing:
             conn.execute(f"UPDATE {tbl} SET external_uuid = ? WHERE id = ?", (str(uuid.uuid4()), row["id"]))
 
 
-def _seed_tables(conn: sqlite3.Connection):
+def _apply_v4_audit_chain_upgrade(conn: DbConnection):
+    aud_cols = {r["name"] for r in conn.execute("PRAGMA table_info(audit_logs)").fetchall()}
+    if "seq_no" not in aud_cols:
+        conn.execute("ALTER TABLE audit_logs ADD COLUMN seq_no INTEGER;")
+    if "prev_hash" not in aud_cols:
+        conn.execute("ALTER TABLE audit_logs ADD COLUMN prev_hash TEXT;")
+    if "event_hash" not in aud_cols:
+        conn.execute("ALTER TABLE audit_logs ADD COLUMN event_hash TEXT;")
+
+    # Temporarily drop update trigger only during schema v4 backfill, then immediately restore it
+    conn.execute("DROP TRIGGER IF EXISTS trg_audit_no_update;")
+    try:
+        backfill_audit_hash_chain(conn, resolve_audit_hmac_key())
+    finally:
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_audit_no_update
+            BEFORE UPDATE ON audit_logs
+            BEGIN
+                SELECT RAISE(ABORT, 'Audit logs are append-only and immutable.');
+            END;
+            """
+        )
+
+
+def _seed_tables(conn: DbConnection):
     seed = get_initial_state()
     ts = now_iso()
     conn.execute(
-        "INSERT OR IGNORE INTO config(key, value, updated_at) VALUES (?, ?, ?)",
+        "INSERT INTO config(key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
         ("slaLimitDays", str(seed.get("slaLimitDays", 7)), ts),
     )
 
@@ -465,10 +501,10 @@ def _seed_tables(conn: sqlite3.Connection):
 
     for s in seed.get("staff", []):
         p_hash = None
-        is_claimed = 0
+        is_claimed = False
         if s["id"] == "stf-secretary" and env_sec_pass:
             p_hash = hash_passcode(env_sec_pass)
-            is_claimed = 1
+            is_claimed = True
         conn.execute(
             """
             INSERT INTO staff(
@@ -488,7 +524,7 @@ def _seed_tables(conn: sqlite3.Connection):
                 s["role"],
                 s["department"],
                 json.dumps(s["assignedWards"]),
-                1 if s.get("isActive", True) else 0,
+                bool(s.get("isActive", True)),
                 json.dumps(s["permissions"]),
                 is_claimed,
                 ts,
@@ -509,7 +545,7 @@ def _seed_tables(conn: sqlite3.Connection):
                 created_at, updated_at, resolved_at, assigned_officer_id, assigned_officer_name,
                 filed_by_role, before_photo_url, after_photo_url, public_remark, internal_remark,
                 rating, feedback_comment, timeline_json, tracking_token_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'NORMAL', ?, 0, NULL, NULL, 0, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'NORMAL', ?, 0, NULL, NULL, 0, TRUE, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 g["id"],
@@ -542,9 +578,10 @@ def _seed_tables(conn: sqlite3.Connection):
         )
         conn.execute(
             """
-            INSERT OR IGNORE INTO grievance_status_history(
+            INSERT INTO grievance_status_history(
                 id, grievance_id, from_status, to_status, actor_id, actor_name, actor_role, remark, created_at
             ) VALUES (?, ?, NULL, ?, 'seed', 'System Seed', 'SYSTEM', ?, ?)
+            ON CONFLICT DO NOTHING
             """,
             (f"gsh-{g['id']}", g["id"], canonical_st, g.get("publicRemark") or "Registered", g["createdAt"]),
         )
@@ -587,16 +624,44 @@ def _seed_tables(conn: sqlite3.Connection):
             ),
         )
 
+    audit_key = resolve_audit_hmac_key()
+    head_row = conn.execute(
+        "SELECT seq_no, event_hash FROM audit_logs WHERE seq_no IS NOT NULL ORDER BY seq_no DESC LIMIT 1"
+    ).fetchone()
+    seq_no = int(head_row["seq_no"]) if head_row else 0
+    prev_hash = str(head_row["event_hash"]) if head_row and head_row["event_hash"] else ("0" * 64)
+
     for aud in seed.get("auditLogs", []):
+        seq_no += 1
+        draft = {
+            "seq_no": seq_no,
+            "id": aud["id"],
+            "timestamp": aud["timestamp"],
+            "request_id": "seed",
+            "actor_id": "seed",
+            "actor_name": aud["actorName"],
+            "actor_role": aud["actorRole"],
+            "session_prefix": "seed",
+            "ip_hash": "00000000",
+            "action": aud["action"],
+            "target_id": aud["targetId"],
+            "outcome": "SUCCESS",
+            "details": aud["details"],
+            "prev_hash": prev_hash,
+        }
+        evt_hash = compute_event_hash(draft, audit_key)
         conn.execute(
             """
             INSERT INTO audit_logs(
-                id, timestamp, request_id, actor_id, actor_name, actor_role, session_prefix,
+                id, seq_no, prev_hash, event_hash, timestamp, request_id, actor_id, actor_name, actor_role, session_prefix,
                 ip_hash, action, target_id, outcome, details
-            ) VALUES (?, ?, 'seed', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, 'seed', ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 aud["id"],
+                seq_no,
+                prev_hash,
+                evt_hash,
                 aud["timestamp"],
                 "seed",
                 aud["actorName"],
@@ -609,16 +674,45 @@ def _seed_tables(conn: sqlite3.Connection):
                 aud["details"],
             ),
         )
+        prev_hash = evt_hash
+
+    if seq_no > 0 and seed.get("auditLogs"):
+        last_seed = seed["auditLogs"][-1]
+        append_checkpoint_record(
+            AUDIT_CHECKPOINTS_PATH,
+            seq_no,
+            last_seed["id"],
+            prev_hash,
+            seq_no,
+            key=audit_key,
+            conn=conn,
+        )
 
 
-def init_db(db_path: str = SQLITE_PATH):
+def init_db(db_path: str | None = None):
     if os.path.exists(LEGACY_JSON_PATH):
         try:
             os.remove(LEGACY_JSON_PATH)
         except OSError:
             pass
 
-    conn = get_connection(db_path)
+    target_url = resolve_database_url(db_path or SQLITE_PATH)
+    backend = detect_database_backend(target_url)
+
+    if backend == "postgresql":
+        run_alembic_upgrade(target_url)
+        conn = get_connection(db_path)
+        try:
+            with transaction(conn):
+                _seed_reference_tables(conn)
+                staff_count = conn.execute("SELECT COUNT(*) AS c FROM staff").fetchone()["c"]
+                if staff_count == 0:
+                    _seed_tables(conn)
+        finally:
+            conn.close()
+        return
+
+    conn = get_connection(db_path or SQLITE_PATH)
     try:
         with DB_WRITE_LOCK:
             conn.execute(
@@ -636,6 +730,8 @@ def init_db(db_path: str = SQLITE_PATH):
                             conn.execute("ALTER TABLE staff ADD COLUMN username TEXT;")
                     if version == 3:
                         _apply_v3_table_upgrades(conn)
+                    if version == 4:
+                        _apply_v4_audit_chain_upgrade(conn)
                     conn.executescript(sql)
                     if version == 3:
                         _seed_reference_tables(conn)
@@ -654,7 +750,7 @@ def init_db(db_path: str = SQLITE_PATH):
 
 
 def append_audit_event(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     actor_id: str,
     actor_name: str,
     actor_role: str,
@@ -667,9 +763,65 @@ def append_audit_event(
     request_id: str | None = None,
 ):
     req_id = request_id or get_request_id()
+    audit_key = resolve_audit_hmac_key()
+    head = conn.execute(
+        "SELECT seq_no, event_hash FROM audit_logs WHERE seq_no IS NOT NULL ORDER BY seq_no DESC LIMIT 1"
+    ).fetchone()
+    next_seq = (int(head["seq_no"]) if head and head["seq_no"] is not None else 0) + 1
+    prev_hash = str(head["event_hash"]) if head and head["event_hash"] else ("0" * 64)
+
+    evt_id = f"aud-{int(time.time() * 1000)}-{os.getpid()}-{next_seq}-{hash(details) & 0xffff:04x}"
+    ts = now_iso()
+    draft = {
+        "seq_no": next_seq,
+        "id": evt_id,
+        "timestamp": ts,
+        "request_id": req_id,
+        "actor_id": actor_id,
+        "actor_name": actor_name,
+        "actor_role": actor_role,
+        "session_prefix": session_prefix,
+        "ip_hash": ip_hash,
+        "action": action,
+        "target_id": target_id,
+        "outcome": outcome,
+        "details": details,
+        "prev_hash": prev_hash,
+    }
+    evt_hash = compute_event_hash(draft, audit_key)
+
+    conn.execute(
+        """
+        INSERT INTO audit_logs(
+            id, seq_no, prev_hash, event_hash, timestamp, request_id, actor_id, actor_name, actor_role, session_prefix,
+            ip_hash, action, target_id, outcome, details
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            evt_id,
+            next_seq,
+            prev_hash,
+            evt_hash,
+            ts,
+            req_id,
+            actor_id,
+            actor_name,
+            actor_role,
+            session_prefix,
+            ip_hash,
+            action,
+            target_id,
+            outcome,
+            details,
+        ),
+    )
+
     evt = {
-        "id": f"aud-{int(time.time() * 1000)}-{os.getpid()}-{hash(details) & 0xffff:04x}",
-        "timestamp": now_iso(),
+        "id": evt_id,
+        "seqNo": next_seq,
+        "prevHash": prev_hash,
+        "eventHash": evt_hash,
+        "timestamp": ts,
         "requestId": req_id,
         "actorId": actor_id,
         "actorName": actor_name,
@@ -681,44 +833,33 @@ def append_audit_event(
         "outcome": outcome,
         "details": details,
     }
-    conn.execute(
-        """
-        INSERT INTO audit_logs(
-            id, timestamp, request_id, actor_id, actor_name, actor_role, session_prefix,
-            ip_hash, action, target_id, outcome, details
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            evt["id"],
-            evt["timestamp"],
-            evt["requestId"],
-            evt["actorId"],
-            evt["actorName"],
-            evt["actorRole"],
-            evt["sessionPrefix"],
-            evt["ipHash"],
-            evt["action"],
-            evt["targetId"],
-            evt["outcome"],
-            evt["details"],
-        ),
-    )
+
     audit_path = AUDIT_JSONL_PATH
     os.makedirs(os.path.dirname(audit_path), exist_ok=True)
     with open(audit_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(evt) + "\n")
+
+    append_checkpoint_record(
+        AUDIT_CHECKPOINTS_PATH,
+        next_seq,
+        evt_id,
+        evt_hash,
+        next_seq,
+        key=audit_key,
+        conn=conn,
+    )
     return evt
 
 
 def append_security_alert(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     severity: str,
     event_type: str,
     actor_hint: str,
     ip_hash: str,
     details: str,
 ):
-    aid = f"alrt-{int(time.time() * 1000)}-{hash(details) & 0xffff:04x}"
+    aid = f"alrt-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}"
     ts = now_iso()
     conn.execute(
         """
@@ -731,7 +872,7 @@ def append_security_alert(
 
 
 def reset_database_with_audit(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     actor: dict,
     session_prefix: str,
     ip_hash: str,

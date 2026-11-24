@@ -807,7 +807,7 @@ function renderDetailDrawer(user, perms) {
               <span class="text-xs font-medium text-slate-600">Ward ${record.ward} · ${esc(record.department)}</span>
             </div>
             <h2 class="font-display text-lg font-bold text-slate-900 mt-0.5">
-              ${isGrv ? `${esc(record.category)} — ${esc(record.landmark)}` : esc(record.serviceName)}
+              ${grv ? `${esc(grv.category)} — ${esc(grv.landmark)}` : esc(srv?.serviceName || '')}
             </h2>
           </div>
           <button type="button" id="btn-close-detail-drawer" class="p-2 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-lg cursor-pointer">${ICONS.x('w-5 h-5')}</button>
@@ -817,42 +817,42 @@ function renderDetailDrawer(user, perms) {
           <div class="flex flex-wrap items-center justify-between gap-3">
             <div class="flex flex-wrap items-center gap-2">
               ${renderStatusLabel(record.status)}
-              ${isGrv ? renderPriorityBadge(record.priority) : ''}
-              ${isGrv && record.escalationLevel > 0 ? `<span class="px-2 py-0.5 text-[11px] font-mono font-semibold bg-red-50 text-red-800 border border-red-200 rounded">L${record.escalationLevel} Escalated</span>` : ''}
+              ${grv ? renderPriorityBadge(grv.priority) : ''}
+              ${grv && (grv.escalationLevel ?? 0) > 0 ? `<span class="px-2 py-0.5 text-[11px] font-mono font-semibold bg-red-50 text-red-800 border border-red-200 rounded">L${grv.escalationLevel} Escalated</span>` : ''}
             </div>
             ${renderSlaBadge(record, record.slaLimitDays || store.staffDashboard.slaLimitDays)}
           </div>
           <div id="drawer-msg-box" role="alert" aria-live="polite" class="hidden p-3 rounded-lg text-sm"></div>
 
           <dl class="grid grid-cols-1 sm:grid-cols-2 gap-4 bg-[#F8FAFC] border border-slate-200 rounded-lg p-4 text-sm">
-            <div><dt class="text-xs text-slate-500">${isGrv ? 'Citizen Name' : 'Applicant Name'}</dt><dd class="font-semibold text-slate-900 mt-0.5">${esc(isGrv ? record.citizenName : record.applicantName)}</dd></div>
+            <div><dt class="text-xs text-slate-500">${isGrv ? 'Citizen Name' : 'Applicant Name'}</dt><dd class="font-semibold text-slate-900 mt-0.5">${esc(grv ? grv.citizenName : srv?.applicantName || '')}</dd></div>
             <div><dt class="text-xs text-slate-500">Contact Number</dt><dd class="font-mono tabular-nums text-slate-900 mt-0.5">${esc(record.mobile)}</dd></div>
             <div><dt class="text-xs text-slate-500">Filed On</dt><dd class="font-mono tabular-nums text-slate-700 mt-0.5">${esc(formatDateTime(record.createdAt))}</dd></div>
             <div><dt class="text-xs text-slate-500">Current Assignee</dt><dd class="font-medium text-slate-900 mt-0.5">${esc(record.assignedOfficerName || 'Unassigned')}</dd></div>
-            <div class="sm:col-span-2"><dt class="text-xs text-slate-500">${isGrv ? 'Description' : 'Address & Verified Docs'}</dt><dd class="text-slate-800 mt-0.5">${esc(isGrv ? record.description : `${record.address} · ${(record.checkedDocs || []).join(', ')}`)}</dd></div>
+            <div class="sm:col-span-2"><dt class="text-xs text-slate-500">${isGrv ? 'Description' : 'Address & Verified Docs'}</dt><dd class="text-slate-800 mt-0.5">${esc(grv ? grv.description : `${srv?.address || ''} · ${(srv?.checkedDocs || []).join(', ')}`)}</dd></div>
           </dl>
 
           ${
-            isGrv
-              ? `<form id="drawer-grv-form" data-id="${esc(record.id)}" class="space-y-4">
+            grv
+              ? `<form id="drawer-grv-form" data-id="${esc(grv.id)}" class="space-y-4">
                   ${
-                    record.beforePhotoUrl
-                      ? `<div><p class="text-xs font-semibold text-slate-600 mb-1.5">Citizen Evidence Photo</p><img src="${esc(record.beforePhotoUrl)}" alt="Evidence" referrerpolicy="no-referrer" class="w-full max-h-52 object-cover rounded-lg border border-slate-200" /></div>`
+                    grv.beforePhotoUrl
+                      ? `<div><p class="text-xs font-semibold text-slate-600 mb-1.5">Citizen Evidence Photo</p><img src="${esc(grv.beforePhotoUrl)}" alt="Evidence" referrerpolicy="no-referrer" class="w-full max-h-52 object-cover rounded-lg border border-slate-200" /></div>`
                       : ''
                   }
                   <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
                     <div>
                       <label class="block text-xs font-semibold text-slate-700 mb-1.5">Workflow Status</label>
                       <select name="status" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white">
-                        ${getAllowedNextStatuses(record.status, user.role)
-                          .map((st) => `<option value="${st}" ${record.status === st ? 'selected' : ''}>${esc(GRIEVANCE_STATUS_LABELS[st] || st)}</option>`)
+                        ${getAllowedNextStatuses(grv.status, user.role)
+                          .map((st) => `<option value="${st}" ${grv.status === st ? 'selected' : ''}>${esc(GRIEVANCE_STATUS_LABELS[st] || st)}</option>`)
                           .join('')}
                       </select>
                     </div>
                     <div>
                       <label class="block text-xs font-semibold text-slate-700 mb-1.5">Priority</label>
                       <select name="priority" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white">
-                        ${PRIORITIES.map((p) => `<option value="${p}" ${(record.priority || 'NORMAL') === p ? 'selected' : ''}>${p}</option>`).join('')}
+                        ${PRIORITIES.map((p) => `<option value="${p}" ${(grv.priority || 'NORMAL') === p ? 'selected' : ''}>${p}</option>`).join('')}
                       </select>
                     </div>
                     <div>
@@ -865,7 +865,7 @@ function renderDetailDrawer(user, perms) {
                         ${activeOfficers
                           .map(
                             (o) =>
-                              `<option value="${esc(o.id)}" ${record.assignedOfficerId === o.id ? 'selected' : ''}>${esc(o.name)} (${esc(o.department)})</option>`
+                              `<option value="${esc(o.id)}" ${grv.assignedOfficerId === o.id ? 'selected' : ''}>${esc(o.name)} (${esc(o.department)})</option>`
                           )
                           .join('')}
                       </select>
@@ -874,29 +874,29 @@ function renderDetailDrawer(user, perms) {
                   <div>
                     <label class="block text-xs font-semibold text-slate-700 mb-1">Official Public Remark</label>
                     <p class="text-[11px] text-slate-500 mb-1.5">Minimum 5 characters mandatory when moving to On Hold, Escalated, Resolved, or Rejected.</p>
-                    <textarea name="publicRemark" rows="2" maxlength="1000" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg">${esc(record.publicRemark || '')}</textarea>
+                    <textarea name="publicRemark" rows="2" maxlength="1000" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg">${esc(grv.publicRemark || '')}</textarea>
                   </div>
                   <div>
                     <label class="block text-xs font-semibold text-slate-700 mb-1.5">Internal Staff Note (Staff Only)</label>
-                    <input name="internalRemark" type="text" maxlength="1000" value="${esc(record.internalRemark || '')}" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg" />
+                    <input name="internalRemark" type="text" maxlength="1000" value="${esc(grv.internalRemark || '')}" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg" />
                   </div>
                   <div>
                     <p class="text-xs font-semibold text-slate-700 mb-1.5">Resolution Proof Image</p>
-                    <input id="drawer-after-photo-url" name="afterPhotoUrl" type="hidden" value="${esc(record.afterPhotoUrl || '')}" />
+                    <input id="drawer-after-photo-url" name="afterPhotoUrl" type="hidden" value="${esc(grv.afterPhotoUrl || '')}" />
                     <div class="flex flex-wrap items-center gap-2">
                       <button type="button" data-attach-proof="${IMG_ROAD_AFTER}" class="px-2.5 py-1.5 text-xs font-medium text-[#059669] bg-emerald-50 hover:bg-emerald-100 rounded-lg cursor-pointer">Attach Sample Road Proof</button>
                       <button type="button" data-attach-proof="${IMG_STREETLIGHT_FIXED}" class="px-2.5 py-1.5 text-xs font-medium text-[#059669] bg-emerald-50 hover:bg-emerald-100 rounded-lg cursor-pointer">Attach Sample Streetlight Proof</button>
                     </div>
                     ${
-                      record.afterPhotoUrl
-                        ? `<img id="drawer-proof-preview" src="${esc(record.afterPhotoUrl)}" alt="Proof" referrerpolicy="no-referrer" class="mt-2.5 w-52 h-32 object-cover rounded-lg border border-emerald-200" />`
+                      grv.afterPhotoUrl
+                        ? `<img id="drawer-proof-preview" src="${esc(grv.afterPhotoUrl)}" alt="Proof" referrerpolicy="no-referrer" class="mt-2.5 w-52 h-32 object-cover rounded-lg border border-emerald-200" />`
                         : `<img id="drawer-proof-preview" src="" alt="" class="hidden mt-2.5 w-52 h-32 object-cover rounded-lg border border-emerald-200" />`
                     }
                   </div>
                   <div class="pt-4 border-t border-slate-200 flex items-center justify-between gap-3">
                     ${
                       perms.canDeleteRecords
-                        ? `<button type="button" id="btn-delete-record" data-del-kind="grievance" data-del-id="${esc(record.id)}" class="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg cursor-pointer">${ICONS.trash('w-3.5 h-3.5')}<span>Delete Ticket</span></button>`
+                        ? `<button type="button" id="btn-delete-record" data-del-kind="grievance" data-del-id="${esc(grv.id)}" class="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg cursor-pointer">${ICONS.trash('w-3.5 h-3.5')}<span>Delete Ticket</span></button>`
                         : `<span class="text-xs text-slate-400">Delete restricted to Super Admin</span>`
                     }
                     <button type="submit" ${store.isSubmitting ? 'disabled' : ''} class="px-5 py-2 text-sm font-semibold text-white bg-[#1E3A8A] hover:bg-[#172E6E] disabled:opacity-60 rounded-lg cursor-pointer">Save Ticket Update</button>
@@ -904,12 +904,12 @@ function renderDetailDrawer(user, perms) {
                 </form>
 
                 <div class="pt-4 border-t border-slate-200 space-y-3">
-                  <h3 class="text-xs font-semibold text-slate-700">Case Notes &amp; Comments (${(record.comments || []).length})</h3>
+                  <h3 class="text-xs font-semibold text-slate-700">Case Notes &amp; Comments (${(grv.comments || []).length})</h3>
                   <div id="comment-msg-box" aria-live="polite" class="hidden p-2.5 rounded-lg text-xs"></div>
                   ${
-                    (record.comments || []).length > 0
+                    (grv.comments || []).length > 0
                       ? `<div class="space-y-2">
-                          ${(record.comments || [])
+                          ${(grv.comments || [])
                             .map(
                               (c) => `
                             <div class="p-2.5 rounded-lg border text-xs ${c.isInternal ? 'bg-amber-50 border-amber-200' : 'bg-[#F8FAFC] border-slate-200'}">
@@ -924,7 +924,7 @@ function renderDetailDrawer(user, perms) {
                         </div>`
                       : `<p class="text-xs text-slate-500">No comments added yet.</p>`
                   }
-                  <form id="drawer-comment-form" data-id="${esc(record.id)}" class="space-y-2">
+                  <form id="drawer-comment-form" data-id="${esc(grv.id)}" class="space-y-2">
                     <textarea name="body" rows="2" minlength="2" maxlength="1000" required placeholder="Add an official update or internal note..." class="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"></textarea>
                     <div class="flex items-center justify-between gap-2">
                       <label class="inline-flex items-center gap-1.5 text-xs text-slate-700 cursor-pointer">
@@ -967,7 +967,7 @@ function renderDetailDrawer(user, perms) {
                   </div>
                   <div>
                     <label class="block text-xs font-semibold text-slate-700 mb-1.5">Official Verification / Approval Remark</label>
-                    <textarea name="officialRemark" rows="3" maxlength="1000" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg">${esc(record.officialRemark || '')}</textarea>
+                    <textarea name="officialRemark" rows="3" maxlength="1000" class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg">${esc(srv?.officialRemark || '')}</textarea>
                   </div>
                   <div class="pt-4 border-t border-slate-200 flex items-center justify-between gap-3">
                     ${
@@ -1208,7 +1208,7 @@ export function renderAdminPortal() {
     </div>
   `;
 
-  let mainHtml = '';
+  let mainHtml;
   if (store.adminView === 'overview') mainHtml = renderOverview(user, visibleGrievances, visibleServices);
   else if (store.adminView === 'grievances') mainHtml = renderGrievancesDesk(user, visibleGrievances);
   else if (store.adminView === 'services') mainHtml = renderServicesDesk(user, visibleServices);
@@ -1602,6 +1602,7 @@ export function bindAdminEvents(root) {
       return;
     }
     const uname = String(fd.get('username') || '').trim();
+    /** @type {Record<string, any>} */
     const payload = {
       name: String(fd.get('name') || ''),
       ...(uname ? { username: uname } : {}),

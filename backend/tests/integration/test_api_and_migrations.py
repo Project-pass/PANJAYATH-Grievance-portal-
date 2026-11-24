@@ -300,13 +300,15 @@ class ApiIntegrationAndMigrationTests(IsolatedServerTestCase):
             up = db.get_connection(legacy_db)
             try:
                 versions = [r["version"] for r in up.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()]
-                self.assertEqual(versions, [1, 2, 3])
+                self.assertEqual(versions, [1, 2, 3, 4])
                 row = up.execute("SELECT status, external_uuid, priority FROM grievances WHERE id = 'ABC-GRV-2026-999'").fetchone()
                 self.assertEqual(row["status"], "IN_PROGRESS")
                 self.assertEqual(row["priority"], "NORMAL")
                 self.assertIsNotNone(row["external_uuid"])
                 s_cols = {r["name"] for r in up.execute("PRAGMA table_info(sessions)").fetchall()}
                 self.assertIn("csrf_token_hash", s_cols)
+                a_cols = {r["name"] for r in up.execute("PRAGMA table_info(audit_logs)").fetchall()}
+                self.assertTrue({"seq_no", "prev_hash", "event_hash"}.issubset(a_cols))
             finally:
                 up.close()
 

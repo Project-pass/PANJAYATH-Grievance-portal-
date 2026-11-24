@@ -597,7 +597,7 @@ function renderTrackView(copy) {
             <div class="flex flex-col items-start sm:items-end gap-2">
               <div class="flex items-center gap-2">
                 ${record.kind === 'grievance' ? renderPriorityBadge(record.priority) : ''}
-                ${record.escalationLevel > 0 ? `<span class="px-2 py-0.5 text-[11px] font-mono font-semibold bg-red-50 text-red-800 border border-red-200 rounded">L${record.escalationLevel} Escalated</span>` : ''}
+                ${(record.escalationLevel ?? 0) > 0 ? `<span class="px-2 py-0.5 text-[11px] font-mono font-semibold bg-red-50 text-red-800 border border-red-200 rounded">L${record.escalationLevel} Escalated</span>` : ''}
                 ${renderStatusLabel(record.status, lang, STATUS_ML)}
               </div>
               ${renderSlaBadge(record, record.slaLimitDays || slaLimit)}
@@ -672,7 +672,7 @@ function renderTrackView(copy) {
                         ${record.feedbackComment ? `<p class="text-xs text-emerald-800 mt-1">“${esc(record.feedbackComment)}”</p>` : ''}
                       </div>
                       <div class="flex items-center gap-1 text-amber-500">
-                        ${[1, 2, 3, 4, 5].map((st) => ICONS.star('w-4 h-4', st <= record.rating)).join('')}
+                        ${[1, 2, 3, 4, 5].map((st) => ICONS.star('w-4 h-4', st <= (record.rating ?? 0))).join('')}
                         <span class="ml-1.5 text-xs font-mono font-bold text-slate-800">${record.rating}/5</span>
                       </div>
                     </div>`
@@ -729,7 +729,7 @@ export function renderCitizenPortal() {
       : 'border-transparent hover:text-slate-900 hover:border-slate-300'
   }">${esc(label)}</button>`;
 
-  let contentHtml = '';
+  let contentHtml;
   if (view === 'home') contentHtml = renderHomeView(copy);
   else if (view === 'grievance') contentHtml = renderGrievanceView(copy);
   else if (view === 'services') contentHtml = renderServicesView(copy);

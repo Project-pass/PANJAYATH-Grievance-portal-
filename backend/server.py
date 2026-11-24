@@ -8,7 +8,9 @@ import hmac
 import json
 import os
 from pathlib import Path
+import signal
 import sys
+import threading
 import time
 from urllib.parse import parse_qs, urlparse
 import uuid
@@ -36,12 +38,15 @@ from app.policies.rbac import (  # noqa: E402
     normalize_grievance_status,
     validate_grievance_transition,
 )
+from app.database.connection import dispose_all_adapters, get_adapter, resolve_database_url  # noqa: E402
+from app.database.interface import detect_database_backend  # noqa: E402
 from app.services.audit import (  # noqa: E402
     export_audit_logs_csv,
     export_audit_logs_json,
     get_audit_retention_summary,
     query_audit_logs,
 )
+from app.services.audit_integrity import verify_audit_chain  # noqa: E402
 from app.services.sla import compute_sla_metrics  # noqa: E402
 from app.services.workflow import (  # noqa: E402
     calculate_hold_transition_fields,
@@ -55,6 +60,7 @@ from app.services.workflow import (  # noqa: E402
     resolve_sla_days_for_ticket,
 )
 from c_engine.build import CEngineError, default_binary_path, ensure_c_engine_ready, verify_c_engine  # noqa: E402
+import db as db_mod  # noqa: E402
 from db import (  # noqa: E402
     SQLITE_PATH,
     append_audit_event,
@@ -133,12 +139,16 @@ def is_production_env() -> bool:
     )
 
 
-def compute_grievance_sla(row, base_sla_limit: int, holidays: set[str]) -> dict:
+def compute_grievance_sla(row, base_sla_limit: int, holidays: set[str], *, use_c_engine: bool = True) -> dict:
     keys = row.keys() if hasattr(row, "keys") else ()
     limit_days = int(row["sla_limit_days"]) if "sla_limit_days" in keys and row["sla_limit_days"] else int(base_sla_limit)
     paused_sec = int(row["paused_seconds"]) if "paused_seconds" in keys and row["paused_seconds"] else 0
     hold_started = row["hold_started_at"] if "hold_started_at" in keys else None
-    c_bin = C_ENGINE_BIN if C_ENGINE_BIN.exists() and os.access(C_ENGINE_BIN, os.X_OK) else None
+    c_bin = (
+        C_ENGINE_BIN
+        if use_c_engine and C_ENGINE_BIN.exists() and os.access(C_ENGINE_BIN, os.X_OK)
+        else None
+    )
     return compute_sla_metrics(
         row["created_at"],
         row["status"],
@@ -543,7 +553,7 @@ class PanchayatApiHandler(BaseHTTPRequestHandler):
         env_sec = os.environ.get("PANCHAYAT_SECRETARY_PASSCODE", "").strip()
         if env_sec:
             return False
-        claimed = conn.execute("SELECT COUNT(*) AS c FROM staff WHERE is_claimed = 1").fetchone()["c"]
+        claimed = conn.execute("SELECT COUNT(*) AS c FROM staff WHERE is_claimed = TRUE").fetchone()["c"]
         return claimed == 0
 
     def _cookie_headers(self, session_token: str, csrf_token: str = "", clear: bool = False) -> list[tuple[str, str]]:
@@ -621,12 +631,19 @@ class PanchayatApiHandler(BaseHTTPRequestHandler):
         status_out = 200
         try:
             if path == "/api/health":
+                backend = detect_database_backend(resolve_database_url(SQLITE_PATH))
+                backend_label = (
+                    "PostgreSQL 16 (SQLAlchemy QueuePool)"
+                    if backend == "postgresql"
+                    else "Python 3 + SQLite WAL"
+                )
                 self._send_json(
                     200,
                     {
                         "ok": True,
                         "status": "healthy",
-                        "backend": "Python 3 + SQLite WAL (PostgreSQL Schema Ready)",
+                        "backend": backend_label,
+                        "databaseBackend": backend,
                         "cEngineCompiled": C_ENGINE_BIN.exists() and os.access(C_ENGINE_BIN, os.X_OK),
                     },
                 )
@@ -678,21 +695,36 @@ class PanchayatApiHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/public/overview":
-                self._rate_limit_or_raise("public_overview", 60, 60, conn)
+                self._rate_limit_or_raise("public_overview", 120, 60, conn)
                 sla_limit = self._get_sla_limit(conn)
                 holidays = load_holidays(conn)
                 cat_policies = load_category_sla_policies(conn)
-                g_rows = conn.execute("SELECT * FROM grievances ORDER BY created_at DESC").fetchall()
-                resolved = [r for r in g_rows if normalize_grievance_status(r["status"]) in ("RESOLVED", "CLOSED")]
+                agg = conn.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS total_count,
+                        COALESCE(SUM(CASE WHEN UPPER(status) IN ('RESOLVED', 'CLOSED') THEN 1 ELSE 0 END), 0) AS resolved_count,
+                        AVG(CASE WHEN rating IS NOT NULL THEN rating END) AS avg_rating,
+                        COUNT(CASE WHEN rating IS NOT NULL THEN 1 END) AS rating_count
+                    FROM grievances
+                    """
+                ).fetchone()
+                resolved_times = conn.execute(
+                    "SELECT created_at, resolved_at FROM grievances WHERE UPPER(status) IN ('RESOLVED', 'CLOSED') AND resolved_at IS NOT NULL"
+                ).fetchall()
                 total_days = 0.0
-                for r in resolved:
-                    if r["resolved_at"]:
-                        dt1 = datetime.fromisoformat(r["created_at"].replace("Z", "+00:00"))
-                        dt2 = datetime.fromisoformat(r["resolved_at"].replace("Z", "+00:00"))
-                        total_days += max(0.5, (dt2.timestamp() - dt1.timestamp()) / 86400.0)
-                avg_days = round(total_days / len(resolved), 1) if resolved else 0.0
-                rated = [r["rating"] for r in g_rows if r["rating"] is not None]
-                avg_rating = round(sum(rated) / len(rated), 1) if rated else 0.0
+                for r in resolved_times:
+                    dt1 = datetime.fromisoformat(r["created_at"].replace("Z", "+00:00"))
+                    dt2 = datetime.fromisoformat(r["resolved_at"].replace("Z", "+00:00"))
+                    total_days += max(0.5, (dt2.timestamp() - dt1.timestamp()) / 86400.0)
+                resolved_count = int(agg["resolved_count"] or 0)
+                total_count = int(agg["total_count"] or 0)
+                avg_days = round(total_days / resolved_count, 1) if resolved_count and resolved_times else 0.0
+                avg_rating = round(float(agg["avg_rating"]), 1) if agg["avg_rating"] is not None else 0.0
+                rating_count = int(agg["rating_count"] or 0)
+                recent_rows = conn.execute(
+                    "SELECT * FROM grievances ORDER BY created_at DESC LIMIT 6"
+                ).fetchall()
 
                 self._send_json(
                     200,
@@ -701,14 +733,14 @@ class PanchayatApiHandler(BaseHTTPRequestHandler):
                         "slaLimitDays": sla_limit,
                         "categorySlaDays": cat_policies,
                         "stats": {
-                            "resolvedCount": len(resolved),
-                            "totalCount": len(g_rows),
+                            "resolvedCount": resolved_count,
+                            "totalCount": total_count,
                             "avgDays": f"{avg_days:.1f}",
                             "activeServicesCount": len(SERVICE_CATALOG),
                             "avgRating": f"{avg_rating:.1f}",
-                            "ratingCount": len(rated),
+                            "ratingCount": rating_count,
                         },
-                        "recentWorks": [public_grievance_summary_dto(r, sla_limit, holidays) for r in g_rows[:6]],
+                        "recentWorks": [public_grievance_summary_dto(r, sla_limit, holidays) for r in recent_rows],
                         "serviceCatalog": SERVICE_CATALOG,
                     },
                 )
@@ -834,34 +866,79 @@ class PanchayatApiHandler(BaseHTTPRequestHandler):
                 page = max(1, int(qs.get("page", ["1"])[0] or 1))
                 page_size = max(1, min(100, int(qs.get("pageSize", ["25"])[0] or 25)))
 
-                rows = conn.execute("SELECT * FROM grievances ORDER BY created_at DESC").fetchall()
-                filtered = []
-                for g in rows:
-                    same_dept = g["department"] == actor["department"] or g["assigned_officer_id"] == actor["id"]
-                    if not check_rbac(actor, g["ward"], same_dept, "VIEW")["allowed"]:
-                        continue
-                    dto = staff_grievance_dto(g, sla_limit, actor, holidays)
-                    if status_f and dto["status"] != status_f:
-                        continue
-                    if ward_f and str(dto["ward"]) != str(ward_f):
-                        continue
-                    if cat_f and dto["category"] != cat_f:
-                        continue
-                    if prio_f and dto["priority"] != prio_f:
-                        continue
-                    if overdue_only and not dto["sla"]["isBreached"]:
-                        continue
-                    if search_f and search_f not in f"{dto['id']} {dto['citizenName']} {dto['landmark']} {dto['description']}".lower():
-                        continue
-                    filtered.append(dto)
+                where_parts: list[str] = []
+                params: list = []
 
-                total = len(filtered)
-                start = (page - 1) * page_size
+                if actor["role"] not in ("SUPER_ADMIN", "CSC_OPERATOR"):
+                    wards = [int(w) for w in (actor.get("assignedWards") or [])]
+                    if not wards:
+                        self._send_json(
+                            200,
+                            {"ok": True, "items": [], "total": 0, "page": page, "pageSize": page_size, "totalPages": 1},
+                        )
+                        return
+                    ward_placeholders = ", ".join("?" for _ in wards)
+                    where_parts.append(f"ward IN ({ward_placeholders})")
+                    params.extend(wards)
+                    where_parts.append("(department = ? OR assigned_officer_id = ?)")
+                    params.extend([actor["department"], actor["id"]])
+
+                if status_f:
+                    where_parts.append("UPPER(status) = ?")
+                    params.append(status_f)
+                if ward_f:
+                    where_parts.append("ward = ?")
+                    params.append(int(ward_f))
+                if cat_f:
+                    where_parts.append("category = ?")
+                    params.append(cat_f)
+                if prio_f:
+                    where_parts.append("UPPER(priority) = ?")
+                    params.append(prio_f)
+                if search_f:
+                    like = f"%{search_f}%"
+                    where_parts.append(
+                        "(LOWER(id) LIKE ? OR LOWER(citizen_name) LIKE ? OR LOWER(landmark) LIKE ? OR LOWER(description) LIKE ?)"
+                    )
+                    params.extend([like, like, like, like])
+
+                where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+
+                if overdue_only:
+                    rows = conn.execute(
+                        f"SELECT * FROM grievances {where_sql} ORDER BY created_at DESC",
+                        tuple(params),
+                    ).fetchall()
+                    filtered = []
+                    for g in rows:
+                        same_dept = g["department"] == actor["department"] or g["assigned_officer_id"] == actor["id"]
+                        if not check_rbac(actor, g["ward"], same_dept, "VIEW")["allowed"]:
+                            continue
+                        sla = compute_grievance_sla(g, sla_limit, holidays, use_c_engine=False)
+                        if not sla["isBreached"]:
+                            continue
+                        filtered.append(g)
+                    total = len(filtered)
+                    start = (page - 1) * page_size
+                    page_rows = filtered[start : start + page_size]
+                else:
+                    total_row = conn.execute(
+                        f"SELECT COUNT(*) AS cnt FROM grievances {where_sql}",
+                        tuple(params),
+                    ).fetchone()
+                    total = int(total_row["cnt"] or 0)
+                    start = (page - 1) * page_size
+                    page_rows = conn.execute(
+                        f"SELECT * FROM grievances {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                        tuple([*params, page_size, start]),
+                    ).fetchall()
+
+                items = [staff_grievance_dto(g, sla_limit, actor, holidays) for g in page_rows]
                 self._send_json(
                     200,
                     {
                         "ok": True,
-                        "items": filtered[start : start + page_size],
+                        "items": items,
                         "total": total,
                         "page": page,
                         "pageSize": page_size,
@@ -924,6 +1001,21 @@ class PanchayatApiHandler(BaseHTTPRequestHandler):
                     )
                 return
 
+            if path == "/api/staff/audit/verify":
+                actor, _, _, _ = self._authenticate(conn)
+                if not actor:
+                    raise AuthenticationError("Authentication required.")
+                rbac = check_rbac(actor, 1, True, "EXPORT_AUDIT")
+                if not rbac["allowed"]:
+                    raise AuthorizationError(rbac["reason"])
+                report = verify_audit_chain(
+                    conn,
+                    checkpoint_path=db_mod.AUDIT_CHECKPOINTS_PATH,
+                    jsonl_path=db_mod.AUDIT_JSONL_PATH,
+                )
+                self._send_json(200 if report["ok"] else 500, {"ok": report["ok"], "verification": report})
+                return
+
             raise NotFoundError("Endpoint not found.")
         except AppError as ae:
             status_out = ae.status_code
@@ -968,7 +1060,7 @@ class PanchayatApiHandler(BaseHTTPRequestHandler):
                     if not sec:
                         raise AppError("Secretary profile missing.", 500, "CONFIG_ERROR")
                     conn.execute(
-                        "UPDATE staff SET passcode_hash = ?, is_claimed = 1, updated_at = ? WHERE id = 'stf-secretary'",
+                        "UPDATE staff SET passcode_hash = ?, is_claimed = TRUE, updated_at = ? WHERE id = 'stf-secretary'",
                         (new_hash, now_iso()),
                     )
                     raw_tok, csrf_tok, tok_prefix = self._issue_session(conn, sec, ip_h)
@@ -1236,7 +1328,7 @@ class PanchayatApiHandler(BaseHTTPRequestHandler):
                     ticket_id = f"ABC-GRV-2026-{next_num}"
 
                     off_rows = conn.execute(
-                        "SELECT * FROM staff WHERE is_active = 1 AND role = 'WARD_OFFICER' AND department = ?",
+                        "SELECT * FROM staff WHERE is_active = TRUE AND role = 'WARD_OFFICER' AND department = ?",
                         (dept,),
                     ).fetchall()
                     auto_off = None
@@ -1283,7 +1375,7 @@ class PanchayatApiHandler(BaseHTTPRequestHandler):
                             dept,
                             clean["priority"],
                             sla_days,
-                            1 if clean["consentAccepted"] else 0,
+                            bool(clean["consentAccepted"]),
                             clean["landmark"],
                             clean["description"],
                             init_status,
@@ -1609,7 +1701,7 @@ class PanchayatApiHandler(BaseHTTPRequestHandler):
                 new_hash = hash_passcode(new_pw)
                 with transaction(conn):
                     conn.execute(
-                        "UPDATE staff SET passcode_hash = ?, is_claimed = 1, updated_at = ? WHERE id = ?",
+                        "UPDATE staff SET passcode_hash = ?, is_claimed = TRUE, updated_at = ? WHERE id = ?",
                         (new_hash, now_iso(), actor["id"]),
                     )
                     # Revoke all other sessions for this staff user and keep current session
@@ -1652,7 +1744,7 @@ class PanchayatApiHandler(BaseHTTPRequestHandler):
                     if not target:
                         raise NotFoundError("Staff account not found.")
                     conn.execute(
-                        "UPDATE staff SET passcode_hash = ?, failed_attempts = 0, locked_until = 0, is_claimed = 1, updated_at = ? WHERE id = ?",
+                        "UPDATE staff SET passcode_hash = ?, failed_attempts = 0, locked_until = 0, is_claimed = TRUE, updated_at = ? WHERE id = ?",
                         (hash_passcode(new_pw), now_iso(), staff_id),
                     )
                     conn.execute("DELETE FROM sessions WHERE staff_id = ?", (staff_id,))
@@ -1734,7 +1826,7 @@ class PanchayatApiHandler(BaseHTTPRequestHandler):
                             dept,
                             clean["priority"],
                             sla_days,
-                            1 if clean["consentAccepted"] else 0,
+                            bool(clean["consentAccepted"]),
                             clean["landmark"],
                             clean["description"],
                             ts,
@@ -1810,7 +1902,7 @@ class PanchayatApiHandler(BaseHTTPRequestHandler):
                         INSERT INTO grievance_comments(id, grievance_id, author_id, author_name, is_internal, body, created_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (cid, ticket_id, actor["id"], actor["name"], 1 if is_internal else 0, c_body, ts),
+                        (cid, ticket_id, actor["id"], actor["name"], bool(is_internal), c_body, ts),
                     )
                     if not is_internal:
                         timeline = json.loads(ticket["timeline_json"])
@@ -1984,7 +2076,7 @@ class PanchayatApiHandler(BaseHTTPRequestHandler):
                             id, external_uuid, name, username, email, passcode_hash, designation, role, department,
                             assigned_wards_json, is_active, permissions_json,
                             failed_attempts, locked_until, is_claimed, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 1, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, TRUE, ?, ?)
                         """,
                         (
                             new_id,
@@ -1997,7 +2089,7 @@ class PanchayatApiHandler(BaseHTTPRequestHandler):
                             clean["role"],
                             clean["department"],
                             json.dumps(clean["assignedWards"]),
-                            1 if clean.get("isActive", True) else 0,
+                            bool(clean.get("isActive", True)),
                             json.dumps(perms),
                             ts,
                             ts,
@@ -2033,12 +2125,12 @@ class PanchayatApiHandler(BaseHTTPRequestHandler):
                     target = conn.execute("SELECT * FROM staff WHERE id = ?", (staff_id,)).fetchone()
                     if not target:
                         raise NotFoundError("Staff account not found.")
-                    next_active = 0 if target["is_active"] else 1
+                    next_active = not bool(target["is_active"])
                     conn.execute(
                         "UPDATE staff SET is_active = ?, updated_at = ? WHERE id = ?",
                         (next_active, now_iso(), staff_id),
                     )
-                    if next_active == 0:
+                    if not next_active:
                         conn.execute("DELETE FROM sessions WHERE staff_id = ?", (staff_id,))
                     append_audit_event(
                         conn,
@@ -2404,10 +2496,10 @@ class PanchayatApiHandler(BaseHTTPRequestHandler):
                             raise ValidationError("Another staff account already uses this User ID.")
 
                     p_hash = target["passcode_hash"]
-                    claimed = target["is_claimed"]
+                    claimed = bool(target["is_claimed"])
                     if "passcode" in clean:
                         p_hash = hash_passcode(clean["passcode"])
-                        claimed = 1
+                        claimed = True
 
                     next_role = clean.get("role", target["role"])
                     if staff_id == actor["id"] and next_role != "SUPER_ADMIN":
@@ -2430,7 +2522,7 @@ class PanchayatApiHandler(BaseHTTPRequestHandler):
                             next_role,
                             clean.get("department", target["department"]),
                             json.dumps(clean.get("assignedWards", json.loads(target["assigned_wards_json"]))),
-                            1 if clean.get("isActive", bool(target["is_active"])) else 0,
+                            bool(clean.get("isActive", bool(target["is_active"]))),
                             json.dumps(clean.get("permissions", json.loads(target["permissions_json"]))),
                             claimed,
                             now_iso(),
@@ -2586,17 +2678,34 @@ def run_server(port: int = 3001, db_path: str = SQLITE_PATH):
     init_db(db_path)
 
     server = ThreadingHTTPServer(("0.0.0.0", port), PanchayatApiHandler)
+    backend = detect_database_backend(resolve_database_url(db_path))
+
+    def _graceful_shutdown(signum, _frame):
+        LOGGER.info("server_shutdown_requested", extra={"structured_data": {"signal": signum}})
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    try:
+        signal.signal(signal.SIGTERM, _graceful_shutdown)
+        signal.signal(signal.SIGINT, _graceful_shutdown)
+    except ValueError:
+        pass
+
     LOGGER.info(
         "server_started",
         extra={
             "structured_data": {
                 "port": port,
                 "env": SETTINGS.app_env,
+                "databaseBackend": backend,
                 "cEngine": str(C_ENGINE_BIN),
             }
         },
     )
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+        dispose_all_adapters()
 
 
 if __name__ == "__main__":

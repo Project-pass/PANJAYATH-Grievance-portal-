@@ -3,12 +3,13 @@ from __future__ import annotations
 import csv
 import io
 import json
-import sqlite3
 from datetime import datetime, timedelta, timezone
+
+from app.database.connection import get_adapter
 
 
 def query_audit_logs(
-    conn: sqlite3.Connection,
+    conn,
     actor: dict,
     *,
     search: str = "",
@@ -35,19 +36,24 @@ def query_audit_logs(
         params.append(outcome)
     if search:
         like = f"%{search.strip().lower()}%"
-        where.append("(lower(actor_name) LIKE ? OR lower(action) LIKE ? OR lower(target_id) LIKE ? OR lower(details) LIKE ?)")
+        where.append(
+            "(lower(actor_name) LIKE ? OR lower(action) LIKE ? OR lower(target_id) LIKE ? OR lower(details) LIKE ?)"
+        )
         params.extend([like, like, like, like])
 
     clause = ("WHERE " + " AND ".join(where)) if where else ""
     total = conn.execute(f"SELECT COUNT(*) AS c FROM audit_logs {clause}", params).fetchone()["c"]
     rows = conn.execute(
-        f"SELECT * FROM audit_logs {clause} ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+        f"SELECT * FROM audit_logs {clause} ORDER BY COALESCE(seq_no, 0) DESC, timestamp DESC LIMIT ? OFFSET ?",
         [*params, safe_size, offset],
     ).fetchall()
 
     items = [
         {
             "id": a["id"],
+            "seqNo": a["seq_no"] if "seq_no" in a.keys() else None,
+            "prevHash": a["prev_hash"] if "prev_hash" in a.keys() else None,
+            "eventHash": a["event_hash"] if "event_hash" in a.keys() else None,
             "timestamp": a["timestamp"],
             "requestId": a["request_id"] if "request_id" in a.keys() else "-",
             "actorName": a["actor_name"],
@@ -69,10 +75,11 @@ def query_audit_logs(
     }
 
 
-def export_audit_logs_csv(conn: sqlite3.Connection, limit: int = 5000) -> str:
+def export_audit_logs_csv(conn, limit: int = 5000) -> str:
     rows = conn.execute(
-        "SELECT id, timestamp, request_id, actor_id, actor_name, actor_role, session_prefix, ip_hash, action, target_id, outcome, details "
-        "FROM audit_logs ORDER BY timestamp DESC LIMIT ?",
+        "SELECT id, seq_no, prev_hash, event_hash, timestamp, request_id, actor_id, actor_name, actor_role, "
+        "session_prefix, ip_hash, action, target_id, outcome, details "
+        "FROM audit_logs ORDER BY COALESCE(seq_no, 0) DESC, timestamp DESC LIMIT ?",
         (max(1, min(20000, int(limit))),),
     ).fetchall()
     buf = io.StringIO()
@@ -80,6 +87,9 @@ def export_audit_logs_csv(conn: sqlite3.Connection, limit: int = 5000) -> str:
     writer.writerow(
         [
             "id",
+            "seq_no",
+            "prev_hash",
+            "event_hash",
             "timestamp",
             "request_id",
             "actor_id",
@@ -94,9 +104,13 @@ def export_audit_logs_csv(conn: sqlite3.Connection, limit: int = 5000) -> str:
         ]
     )
     for r in rows:
+        keys = r.keys()
         writer.writerow(
             [
                 r["id"],
+                r["seq_no"] if "seq_no" in keys else "",
+                r["prev_hash"] if "prev_hash" in keys else "",
+                r["event_hash"] if "event_hash" in keys else "",
                 r["timestamp"],
                 r["request_id"],
                 r["actor_id"],
@@ -113,28 +127,34 @@ def export_audit_logs_csv(conn: sqlite3.Connection, limit: int = 5000) -> str:
     return buf.getvalue()
 
 
-def export_audit_logs_json(conn: sqlite3.Connection, limit: int = 5000) -> str:
+def export_audit_logs_json(conn, limit: int = 5000) -> str:
     rows = conn.execute(
-        "SELECT id, timestamp, request_id, actor_id, actor_name, actor_role, session_prefix, action, target_id, outcome, details "
-        "FROM audit_logs ORDER BY timestamp DESC LIMIT ?",
+        "SELECT id, seq_no, prev_hash, event_hash, timestamp, request_id, actor_id, actor_name, actor_role, "
+        "session_prefix, ip_hash, action, target_id, outcome, details "
+        "FROM audit_logs ORDER BY COALESCE(seq_no, 0) DESC, timestamp DESC LIMIT ?",
         (max(1, min(20000, int(limit))),),
     ).fetchall()
-    return json.dumps([dict(r) for r in rows], indent=2)
+    out = [{k: r[k] for k in r.keys()} for r in rows]
+    return json.dumps(out, indent=2)
 
 
-def get_audit_retention_summary(conn: sqlite3.Connection, retention_days: int = 365) -> dict:
+def get_audit_retention_summary(conn, retention_days: int = 365) -> dict:
     cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat().replace("+00:00", "Z")
     total = conn.execute("SELECT COUNT(*) FROM audit_logs").fetchone()[0]
     active_window = conn.execute(
         "SELECT COUNT(*) FROM audit_logs WHERE timestamp >= ?", (cutoff,)
     ).fetchone()[0]
-    triggers = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='audit_logs'"
-    ).fetchall()
+    if getattr(conn, "backend_name", "sqlite") == "postgresql":
+        triggers = get_adapter().list_audit_triggers(conn)
+    else:
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='audit_logs'"
+        ).fetchall()
+        triggers = [t["name"] for t in rows]
     return {
         "retentionDays": retention_days,
         "totalRecords": total,
         "withinWindow": active_window,
         "archiveEligible": max(0, total - active_window),
-        "immutableTriggers": [t["name"] for t in triggers],
+        "immutableTriggers": triggers,
     }

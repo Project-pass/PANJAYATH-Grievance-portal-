@@ -1,0 +1,78 @@
+services:
+  proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    ports:
+      - "${WEB_PORT:-3000}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - public_net
+      - internal_net
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    expose:
+      - "3001"
+    environment:
+      APP_ENV: production
+      PORT: "3001"
+      PANCHAYAT_SESSION_SECRET: ${PANCHAYAT_SESSION_SECRET:?PANCHAYAT_SESSION_SECRET must be set (>= 32 chars)}
+      PANCHAYAT_AUDIT_HMAC_KEY: ${PANCHAYAT_AUDIT_HMAC_KEY:?PANCHAYAT_AUDIT_HMAC_KEY must be set (>= 32 chars)}
+      PANCHAYAT_SECRETARY_PASSCODE: ${PANCHAYAT_SECRETARY_PASSCODE:-}
+      PANCHAYAT_ALLOWED_ORIGINS: ${PANCHAYAT_ALLOWED_ORIGINS:?PANCHAYAT_ALLOWED_ORIGINS must be set}
+      PANCHAYAT_LOG_LEVEL: ${PANCHAYAT_LOG_LEVEL:-INFO}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-panchayat}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-panchayat}
+    volumes:
+      - panchayat_data:/app/backend/data
+      - panchayat_backups:/app/backend/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - internal_net
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3001/api/ready', timeout=3)"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-panchayat}
+      POSTGRES_USER: ${POSTGRES_USER:-panchayat}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+    volumes:
+      - panchayat_pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    networks:
+      - internal_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-panchayat} -d ${POSTGRES_DB:-panchayat}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  public_net:
+    driver: bridge
+  internal_net:
+    driver: bridge
+    internal: true
+
+volumes:
+  panchayat_data:
+  panchayat_backups:
+  panchayat_pgdata:

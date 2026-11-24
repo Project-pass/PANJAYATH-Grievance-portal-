@@ -3,12 +3,18 @@
     "target": "ES2022",
     "module": "ESNext",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"],
     "skipLibCheck": true,
     "moduleResolution": "bundler",
+    "resolveJsonModule": true,
     "allowJs": true,
-    "checkJs": false,
+    "checkJs": true,
+    "strictNullChecks": true,
+    "noImplicitAny": false,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "noEmit": true
   },
-  "include": ["src/**/*.js"],
+  "include": ["src/**/*.js", "src/**/*.mjs"],
   "exclude": ["dist", "node_modules"]
 }

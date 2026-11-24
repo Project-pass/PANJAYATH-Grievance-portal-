@@ -64,7 +64,7 @@ function renderApp() {
 
   root.querySelectorAll('[data-portal-switch]').forEach((btn) => {
     btn.addEventListener('click', () => {
-      const mode = btn.getAttribute('data-portal-switch');
+      const mode = btn.getAttribute('data-portal-switch') === 'admin' ? 'admin' : 'citizen';
       store.portalMode = mode;
       window.history.replaceState({}, '', mode === 'admin' ? '/admin' : '/');
       notify();

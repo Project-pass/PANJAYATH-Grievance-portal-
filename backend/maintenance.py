@@ -9,13 +9,21 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 
-from db import SQLITE_PATH, get_connection, init_db
+import db as db_mod
+from app.database.connection import resolve_database_url
+from app.database.interface import detect_database_backend
+from app.services.audit_integrity import (
+    create_audit_checkpoint,
+    verify_audit_chain,
+)
 from security_utils import get_session_secret_bytes
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 BACKUP_DIR = os.path.join(BASE_DIR, "backups")
+SQLITE_PATH = db_mod.SQLITE_PATH
 
 
 def sha256_file(path: str) -> str:
@@ -42,17 +50,33 @@ def _resolve_backup_hmac_key() -> bytes:
 
 
 def run_backup(encrypt: bool = False) -> dict:
-    init_db()
+    db_mod.init_db(SQLITE_PATH)
     os.makedirs(BACKUP_DIR, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    dest_db = os.path.join(BACKUP_DIR, f"panchayat_{ts}.db")
-    src = get_connection(SQLITE_PATH)
-    dst = sqlite3.connect(dest_db)
-    try:
-        src.backup(dst)
-    finally:
-        dst.close()
-        src.close()
+    backend = detect_database_backend(resolve_database_url(SQLITE_PATH))
+
+    if backend == "postgresql":
+        if not shutil.which("pg_dump"):
+            raise RuntimeError("pg_dump binary is required for PostgreSQL backups.")
+        dest_dump = os.path.join(BACKUP_DIR, f"panchayat_{ts}.dump")
+        proc = subprocess.run(
+            ["pg_dump", "-Fc", "-f", dest_dump, resolve_database_url(SQLITE_PATH)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"pg_dump failed: {proc.stderr.strip()}")
+        dest_db = dest_dump
+    else:
+        dest_db = os.path.join(BACKUP_DIR, f"panchayat_{ts}.db")
+        src = db_mod.get_connection(SQLITE_PATH)
+        dst = sqlite3.connect(dest_db)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+            src.close()
 
     os.chmod(dest_db, 0o600)
     plain_digest = sha256_file(dest_db)
@@ -97,6 +121,7 @@ def run_backup(encrypt: bool = False) -> dict:
     hmac_sig = hmac_file(artifact_path, _resolve_backup_hmac_key())
     manifest = {
         "backupFile": artifact_path,
+        "backend": backend,
         "encrypted": encrypted,
         "createdAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "sha256": artifact_digest,
@@ -193,9 +218,9 @@ def run_restore_drill(backup_path: str) -> dict:
 
 
 def check_audit_retention(days: int = 365) -> dict:
-    init_db()
+    db_mod.init_db(SQLITE_PATH)
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat().replace("+00:00", "Z")
-    conn = get_connection(SQLITE_PATH)
+    conn = db_mod.get_connection(SQLITE_PATH)
     try:
         total = conn.execute("SELECT COUNT(*) FROM audit_logs").fetchone()[0]
         within_window = conn.execute(
@@ -215,15 +240,42 @@ def check_audit_retention(days: int = 365) -> dict:
     }
 
 
+def run_audit_checkpoint() -> dict:
+    db_mod.init_db(SQLITE_PATH)
+    conn = db_mod.get_connection(SQLITE_PATH)
+    try:
+        with db_mod.transaction(conn):
+            return create_audit_checkpoint(conn, db_mod.AUDIT_CHECKPOINTS_PATH)
+    finally:
+        conn.close()
+
+
+def run_audit_verify(checkpoint_path: str | None = None, jsonl_path: str | None = None) -> dict:
+    db_mod.init_db(SQLITE_PATH)
+    conn = db_mod.get_connection(SQLITE_PATH)
+    try:
+        return verify_audit_chain(
+            conn,
+            checkpoint_path=checkpoint_path or db_mod.AUDIT_CHECKPOINTS_PATH,
+            jsonl_path=jsonl_path or db_mod.AUDIT_JSONL_PATH,
+        )
+    finally:
+        conn.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description="ABC Gram Panchayat Database Maintenance & Backup Drill")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    bkp_p = sub.add_parser("backup", help="Create online transactional SQLite backup with SHA-256 + HMAC manifest")
+    bkp_p = sub.add_parser("backup", help="Create online transactional DB backup with SHA-256 + HMAC manifest")
     bkp_p.add_argument("--encrypt", action="store_true", help="Encrypt backup with AES-256-CBC using PANCHAYAT_BACKUP_KEY")
     drill_p = sub.add_parser("restore-drill", help="Verify backup checksum/HMAC and integrity via test restore")
     drill_p.add_argument("backup_file")
     ret_p = sub.add_parser("retention-check", help="Inspect immutable audit retention window")
     ret_p.add_argument("--days", type=int, default=365)
+    sub.add_parser("audit-checkpoint", help="Write a signed external audit hash checkpoint")
+    ver_p = sub.add_parser("audit-verify", help="Verify full cryptographic audit hash chain and checkpoints")
+    ver_p.add_argument("--checkpoints", default=None)
+    ver_p.add_argument("--jsonl", default=None)
 
     args = parser.parse_args()
     if args.cmd == "backup":
@@ -232,6 +284,13 @@ def main():
         print(json.dumps(run_restore_drill(args.backup_file), indent=2))
     elif args.cmd == "retention-check":
         print(json.dumps(check_audit_retention(args.days), indent=2))
+    elif args.cmd == "audit-checkpoint":
+        print(json.dumps(run_audit_checkpoint(), indent=2))
+    elif args.cmd == "audit-verify":
+        res = run_audit_verify(args.checkpoints, args.jsonl)
+        print(json.dumps(res, indent=2))
+        if not res["ok"]:
+            sys.exit(1)
 
 
 if __name__ == "__main__":

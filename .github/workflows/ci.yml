@@ -1,41 +1,157 @@
-name: CI Verification & Security Checks
+name: CI Verification & Production Gate
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, production-remediation-v2]
   pull_request:
     branches: [main, master]
 
 jobs:
-  backend-and-c-engine:
+  python-backend-and-postgres:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: panchayat
+          POSTGRES_USER: panchayat
+          POSTGRES_PASSWORD: ci_postgres_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U panchayat -d panchayat"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    env:
+      PANCHAYAT_ENV: test
+      DATABASE_URL: postgresql+psycopg://panchayat:ci_postgres_password@localhost:5432/panchayat
+      TEST_POSTGRES_URL: postgresql+psycopg://panchayat:ci_postgres_password@localhost:5432/panchayat
+      PANCHAYAT_SESSION_SECRET: ci-session-secret-0123456789abcdef0123456789abcdef
+      PANCHAYAT_AUDIT_HMAC_KEY: ci-audit-hmac-key-0123456789abcdef0123456789abcdef
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
       - name: Compile and verify C SLA/RBAC engine
         run: python3 backend/c_engine/build.py --force
-      - name: Run unit, integration, security, E2E, and performance tests
-        run: python3 -m unittest discover -s backend/tests -p "test_*.py" -v
-      - name: Verify backup, restore drill, and audit retention check
+      - name: Run Ruff and Mypy checks
         run: |
+          ruff check backend/
+          mypy backend/app
+      - name: Run Alembic migrations against PostgreSQL 16
+        run: alembic -c backend/alembic.ini upgrade head
+      - name: Run full unit, integration, security, PostgreSQL, and audit integrity suite
+        run: python3 -m unittest discover -s backend/tests -p "test_*.py" -v
+      - name: Run SQLite WAL & PostgreSQL performance benchmark
+        run: python3 backend/tests/performance/benchmark_runner.py --counts 500 5000
+      - name: Verify audit chain checkpoint, backup, restore drill, and retention
+        run: |
+          unset DATABASE_URL
+          python3 backend/maintenance.py audit-checkpoint
+          python3 backend/maintenance.py audit-verify
           MANIFEST=$(python3 backend/maintenance.py backup)
           echo "$MANIFEST"
           BKP_FILE=$(python3 -c 'import json, sys; print(json.loads(sys.stdin.read())["backupFile"])' <<< "$MANIFEST")
           python3 backend/maintenance.py restore-drill "$BKP_FILE"
           python3 backend/maintenance.py retention-check --days 365
 
-  frontend-and-rules:
+  frontend-quality-and-build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version-file: ".nvmrc"
           cache: npm
-      - run: npm ci
+      - name: Clean install frontend dependencies
+        run: npm ci
       - name: Lint Firestore security rules
         run: npx eslint firestore.rules
-      - name: TypeScript / Vite build check
-        run: npm run lint && npm run build
+      - name: Run TypeScript checkJs & Security ESLint
+        run: npm run lint
+      - name: Build production Vite bundle
+        run: npm run build
+
+  firebase-emulator-security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: npm
+      - name: Clean install dependencies
+        run: npm ci
+      - name: Execute genuine Firebase Firestore Emulator security rules tests
+        run: npx firebase emulators:exec --only firestore "npm run test:firestore"
+
+  docker-proxy-acceptance:
+    runs-on: ubuntu-latest
+    needs: [python-backend-and-postgres, frontend-quality-and-build]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: npm
+      - name: Build API & Web container images
+        run: |
+          docker build -t panchayat-api:ci -f Dockerfile .
+          docker build -t panchayat-web:ci -f Dockerfile.web .
+      - name: Boot Docker Compose Nginx + API + PostgreSQL stack
+        run: |
+          POSTGRES_PASSWORD=ci_compose_password \
+          PANCHAYAT_SESSION_SECRET=ci-compose-session-secret-0123456789abcdef0123456789 \
+          PANCHAYAT_AUDIT_HMAC_KEY=ci-compose-audit-hmac-0123456789abcdef0123456789 \
+          docker compose up -d --wait
+      - name: Verify Nginx SPA, API health/readiness, and security headers
+        run: |
+          curl -fsSI http://127.0.0.1:8080/ | tee /tmp/headers.txt
+          grep -qi "X-Content-Type-Options: nosniff" /tmp/headers.txt
+          grep -qi "X-Frame-Options: DENY" /tmp/headers.txt
+          grep -qi "Content-Security-Policy:" /tmp/headers.txt
+          curl -fsS http://127.0.0.1:8080/api/health | grep -q "PostgreSQL"
+          curl -fsS http://127.0.0.1:8080/api/ready | grep -q '"ready":true'
+      - name: Run Playwright Chromium E2E acceptance suite against Nginx proxy
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          BASE_URL=http://127.0.0.1:8080 npx playwright test --project=chromium
+      - name: Tear down Docker Compose stack
+        if: always()
+        run: docker compose down -v
+
+  security-and-supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: npm
+      - name: Audit npm dependencies
+        run: |
+          npm ci
+          npm audit --audit-level=high
+      - name: Audit Python dependencies
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements.txt
+      - name: Check for forbidden browser storage or hardcoded prod secrets
+        run: |
+          ! grep -rnE "localStorage|sessionStorage" src/
+          ! grep -rnE "postgres://panchayat:panchayat@" docker-compose.prod.yml backend/

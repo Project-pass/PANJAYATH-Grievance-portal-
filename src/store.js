@@ -3,7 +3,13 @@ import {
   signInWithGoogleCloud,
   signOutGoogleCloud,
 } from './firebase.js';
+import {
+  parsePublicOverviewPayload,
+  parseStaffDashboardPayload,
+  parseTrackedRecordPayload,
+} from './types.js';
 
+/** @type {import('./types.js').StaffPermissions} */
 const CITIZEN_PERMISSIONS = {
   canApproveCertificates: false,
   canAssignTickets: false,
@@ -12,6 +18,10 @@ const CITIZEN_PERMISSIONS = {
   canVerifyDocuments: false,
 };
 
+/**
+ * @param {string} name
+ * @returns {string | null}
+ */
 function readCookie(name) {
   const prefix = `${name}=`;
   const parts = String(document.cookie || '').split(';');
@@ -24,6 +34,7 @@ function readCookie(name) {
   return null;
 }
 
+/** @type {import('./types.js').PortalStore} */
 export const store = {
   publicOverview: {
     slaLimitDays: 7,
@@ -134,6 +145,11 @@ export function canViewService(app) {
   return inWard && sameDept;
 }
 
+/**
+ * @param {string} url
+ * @param {RequestInit} [options]
+ * @returns {Promise<{ status: number, ok: boolean, data: Record<string, any> }>}
+ */
 async function apiRequest(url, options = {}) {
   const method = (options.method || 'GET').toUpperCase();
   const isMutation = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method);
@@ -151,7 +167,8 @@ async function apiRequest(url, options = {}) {
     credentials: 'same-origin',
     cache: 'no-store',
   });
-  let data = {};
+  /** @type {Record<string, any>} */
+  let data;
   try {
     data = await res.json();
   } catch {
@@ -166,13 +183,11 @@ export async function refreshPublicOverview() {
     apiRequest('/api/auth/status', { method: 'GET' }),
   ]);
   if (ovRes.ok && ovRes.data.ok) {
-    store.publicOverview = {
-      slaLimitDays: ovRes.data.slaLimitDays || 7,
-      categorySlaDays: ovRes.data.categorySlaDays || {},
-      stats: ovRes.data.stats || store.publicOverview.stats,
-      recentWorks: ovRes.data.recentWorks || [],
-      serviceCatalog: ovRes.data.serviceCatalog || [],
-    };
+    try {
+      store.publicOverview = parsePublicOverviewPayload(ovRes.data, store.publicOverview);
+    } catch {
+      // Preserve fallback overview if payload shape is unexpected
+    }
   }
   if (authRes.ok && authRes.data.ok) {
     store.bootstrapRequired = Boolean(authRes.data.bootstrapRequired);
@@ -189,17 +204,9 @@ export async function refreshPublicOverview() {
 export async function refreshStaffDashboard() {
   const res = await apiRequest('/api/staff/dashboard', { method: 'GET' });
   if (res.ok && res.data.ok) {
-    store.currentUser = res.data.user;
-    store.staffDashboard = {
-      slaLimitDays: res.data.slaLimitDays || 7,
-      grievances: res.data.grievances || [],
-      services: res.data.services || [],
-      staff: res.data.staff || [],
-      auditLogs: res.data.auditLogs || [],
-      securityAlerts: res.data.securityAlerts || [],
-      notifications: res.data.notifications || [],
-      auditRetention: res.data.auditRetention || null,
-    };
+    const parsed = parseStaffDashboardPayload(res.data);
+    store.currentUser = parsed.user;
+    store.staffDashboard = parsed.dashboard;
   } else if (res.status === 401) {
     store.csrfToken = null;
     store.currentUser = null;
@@ -333,7 +340,12 @@ export async function trackApplication(trackingId, trackingToken, mobileLast4) {
     body: JSON.stringify({ trackingId, trackingToken, mobileLast4 }),
   });
   if (res.ok && res.data.ok) {
-    store.trackedRecord = res.data.record;
+    try {
+      store.trackedRecord = parseTrackedRecordPayload(res.data.record);
+    } catch (err) {
+      store.trackedRecord = null;
+      store.trackError = err instanceof Error ? err.message : 'Verification failed.';
+    }
   } else {
     store.trackedRecord = null;
     store.trackError = res.data.error || 'Verification failed.';
@@ -356,7 +368,7 @@ export async function submitFeedback(ticketId, rating, comment) {
     }
   );
   if (res.ok && res.data.ok) {
-    store.trackedRecord = res.data.record;
+    store.trackedRecord = parseTrackedRecordPayload(res.data.record);
     await refreshPublicOverview();
   }
   return res.data;
@@ -375,7 +387,7 @@ export async function reopenGrievance(ticketId, reason) {
     }
   );
   if (res.ok && res.data.ok) {
-    store.trackedRecord = res.data.record;
+    store.trackedRecord = parseTrackedRecordPayload(res.data.record);
     await refreshPublicOverview();
   }
   return res.data;
@@ -459,6 +471,7 @@ export async function updateSlaLimit(days) {
 }
 
 export async function maintenanceReset(confirmPhrase, maintenanceKey = '') {
+  /** @type {Record<string, string>} */
   const payload = { confirmPhrase };
   if (maintenanceKey) payload.maintenanceKey = maintenanceKey;
   const res = await apiRequest('/api/staff/maintenance/reset', {

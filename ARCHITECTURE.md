@@ -6,27 +6,33 @@
 Browser (Citizen / Staff)
    │  HTTPS / Same-Origin Cookies (panchayat_sid HttpOnly + panchayat_csrf)
    ▼
-Vite Dev Proxy / Production Reverse Proxy (:3000)
-   ├── Static ES Modules + Tailwind Assets (src/, dist/)
-   └── /api/* & /api/v1/* ──▶ Python 3.11 HTTP Server (backend/server.py :3001)
+Nginx Production Reverse Proxy (:8080, Dockerfile.web) / Vite Dev Proxy (:3000)
+   ├── Static Built SPA Bundle (dist/, try_files -> /index.html, Security & CSP Headers)
+   └── /api/* & /api/v1/* ──▶ Internal Python 3.11 HTTP API (backend/server.py :3001)
                                   ├── Core: config.py, logging.py, exceptions.py
-                                  ├── Policies: rbac.py (deny-by-default & workflow FSM)
-                                  ├── Services: sla.py, workflow.py, audit.py
+                                  ├── Policies: rbac.py (deny-by-default & 10-state FSM)
+                                  ├── Services: sla.py, workflow.py, audit.py, audit_integrity.py
                                   ├── Security: security_utils.py (scrypt, HMAC-SHA256, allowlists)
                                   ├── Native C Engine: backend/c_engine/sla_rbac
-                                  └── Persistence: SQLite WAL (backend/db.py) / Postgres ORM + Alembic
+                                  └── DatabaseAdapter Layer (app/database/)
+                                        ├── SQLiteAdapter (WAL mode + BEGIN IMMEDIATE)
+                                        └── PostgresAdapter (SQLAlchemy 2.x QueuePool + psycopg3 + Alembic)
 ```
 
 ## 2. Backend Module Responsibilities
-- **`backend/server.py`**: Request lifecycle (`X-Request-ID`, structured JSON access logs), origin/CSRF validation, rate limiting, cookie session management, strict response DTO serialization, and REST routing (`/api/*` & `/api/v1/*`).
-- **`backend/app/core/config.py`**: Environment resolution (`APP_ENV`), production fail-fast validation of `PANCHAYAT_SESSION_SECRET`, and `0600` `.session_secret` generation in development.
-- **`backend/app/core/logging.py`**: Context-local `requestId` propagation and automatic `[REDACTED]` masking of secrets, passcodes, cookies, and tokens in structured logs.
-- **`backend/app/core/exceptions.py`**: Typed exception hierarchy (`ValidationError`, `AuthenticationError`, `AuthorizationError`, `NotFoundError`, `PayloadTooLargeError`, `RateLimitError`, `LockedAccountError`) mapped to consistent JSON error envelopes.
-- **`backend/app/policies/rbac.py`**: Authoritative Python RBAC evaluator (`evaluate_rbac`) and canonical grievance finite-state machine (`CANONICAL_GRIEVANCE_STATUSES`, `GRIEVANCE_TRANSITIONS`, `validate_grievance_transition`).
-- **`backend/app/services/sla.py`**: Category + priority SLA resolver (`DEFAULT_CATEGORY_SLA_DAYS`, `PRIORITY_ADJUSTMENTS`), UTC working-day counter (`count_working_days` excluding Sundays and Panchayat `holidays`), and `ON_HOLD` clock pause calculation.
-- **`backend/app/services/workflow.py`**: Duplicate grievance detection, `ON_HOLD` pause/resume accumulation, auto-escalation sweep (`escalate_overdue_grievances`), status history, assignments, and in-app notifications.
-- **`backend/app/services/audit.py`**: Paginated audit querying, CSV/JSON streaming exports, and audit retention inspection.
-- **`backend/c_engine/build.py` & `sla_rbac.c`**: Deterministic compiler/verifier checking existence, `os.X_OK`, and source `mtime` against `-O2 -Wall -Wextra -Werror` builds.
+- **`backend/server.py`**: Threading HTTP server with graceful `SIGTERM`/`SIGINT` adapter disposal, `X-Request-ID` correlation, structured JSON access logs, origin/CSRF validation, cookie session management, strict DTO serialization, SQL-level filtered grievance pagination, and REST routing (`/api/*` & `/api/v1/*`).
+- **`backend/app/database/`**:
+  - `interface.py`: `DatabaseAdapter` contract, `RowProxy`, safe SQL tokenizer translating `?` placeholders to `:pN` (`translate_qmark_sql`), transient error detection (`is_transient_db_error`), and retry helper (`with_db_retry`).
+  - `sqlite_adapter.py`: Thread-safe SQLite WAL adapter with `PRAGMA foreign_keys = ON` and serialized write lock.
+  - `postgres_adapter.py`: SQLAlchemy 2.x engine with `QueuePool` (`pool_size=10`, `max_overflow=20`, `pool_pre_ping=True`, `pool_recycle=1800`).
+  - `connection.py` & `transactions.py`: `DATABASE_URL`-driven adapter resolver, `get_db_connection()`, `run_transaction()`, and `dispose_all_adapters()`.
+  - `repositories/`: Parameterized data access repositories (`GrievanceRepository`, `StaffRepository`, `ServiceRepository`, `AuditRepository`).
+  - `postgres_models.py` & `migrations/runner.py`: Complete 18-table SQLAlchemy ORM metadata and programmatic Alembic upgrade runner.
+- **`backend/app/services/audit_integrity.py`**: Cryptographic HMAC-SHA256 hash chaining (`seq_no`, `prev_hash`, `event_hash`), signed external checkpoints (`audit_checkpoints.jsonl`), key separation (`PANCHAYAT_AUDIT_HMAC_KEY`), and chain tamper verification (`/api/staff/audit/verify`, `maintenance.py audit-verify`).
+- **`backend/app/core/config.py`, `logging.py`, `exceptions.py`**: Environment resolution, fail-fast secret checks, `[REDACTED]` log scrubbing, and typed `AppError` JSON responses.
+- **`backend/app/policies/rbac.py`**: Authoritative Python RBAC evaluator (`evaluate_rbac`) and canonical 10-state grievance finite-state machine.
+- **`backend/app/services/sla.py` & `workflow.py`**: Category + priority SLA resolver, working-day calculation excluding Sundays and Panchayat holidays, `ON_HOLD` clock pause tracking, duplicate detection, and overdue escalation sweeps.
+- **`backend/c_engine/build.py` & `sla_rbac.c`**: Deterministic C compiler/verifier checking existence, `os.X_OK`, and source `mtime` (`-O2 -Wall -Wextra -Werror`).
 
 ## 3. Canonical Grievance Lifecycle
 1. `SUBMITTED` -> Initial public or walk-in intake when no ward officer is auto-matched.
@@ -41,8 +47,6 @@ Vite Dev Proxy / Production Reverse Proxy (:3000)
 10. `REOPENED` -> Reopened by verified citizen (`POST /api/public/grievances/{id}/reopen`) or Super Admin from `RESOLVED`/`CLOSED`/`REJECTED` (clears `resolved_at`, mandatory reason >= 5 chars).
 
 ## 4. Frontend Module Structure
-- `src/main.js`: Bootstraps state, renders portals, binds global `Escape` modal/drawer dismissal.
-- `src/store.js`: Pure in-memory state (`credentials: 'same-origin'`, `X-CSRF-Token` header injection, `isSubmitting` guard, zero `localStorage` PII/tokens).
-- `src/citizenPortal.js`: Citizen home (real DB stats), grievance submission (priority, consent, duplicate warnings), e-service catalog/application, verified citizen tracker + feedback + reopen flow.
-- `src/adminPortal.js`: Staff sign-in / first-run bootstrap claim, ward/dept/priority/SLA filtered dashboard, detail drawer with comments & SLA breakdown, escalation sweep, user/RBAC management, password change & admin reset, and CSV/JSON audit export.
-- `src/i18n.js` & `src/icons.js`: English/Malayalam translations and accessible status/priority badges.
+- `tsconfig.json` (`checkJs: true`, `strictNullChecks: true`, `noUnusedLocals`, `noUnusedParameters`) + `eslint.config.js` (`@eslint/js` + security restrictions banning `localStorage`, `sessionStorage`, `eval`, `alert`).
+- `src/types.js`: Centralized JSDoc `@typedef` domain schemas and runtime API response validators (`parsePublicOverviewPayload`, `parseStaffDashboardPayload`, `parseTrackedRecordPayload`).
+- `src/main.js`, `src/store.js`, `src/citizenPortal.js`, `src/adminPortal.js`, `src/i18n.js`, `src/icons.js`, `src/firebase.js`: Pure in-memory ES module portal (`credentials: 'same-origin'`, `X-CSRF-Token` header injection).
