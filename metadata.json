@@ -1,0 +1,6 @@
+{
+  "name": "ABC Gram Panchayat — Civic Grievance & E-Service Portal",
+  "description": "Public Grievance Redressal, Citizen E-Service Portal, and Role-Based Administrative Desk for ABC Gram Panchayat.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
